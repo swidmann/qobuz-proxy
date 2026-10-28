@@ -31,6 +31,7 @@ MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2.0
 REQUEST_TIMEOUT_SECONDS = 10.0
 IDENTITY_RETRY_SECONDS = 10.0
+IDENTITY_CACHE_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -124,6 +125,8 @@ class DLNAClient:
         self._description_location: Optional[str] = None
         self._identity_lock = asyncio.Lock()
         self._identity_retry_at = 0.0
+        self._identity_verified_at = 0.0
+        self._verified_endpoint: Optional[tuple[str, int, Optional[str]]] = None
         self.device_info: Optional[DLNADeviceInfo] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_volume_time_ms: float = 0
@@ -185,27 +188,45 @@ class DLNAClient:
             except Exception as e:
                 logger.warning(f"Could not persist renderer location: {e}")
 
-    async def ensure_device_identity(self, *, initial: bool = False) -> bool:
-        """Verify the endpoint before controls; rediscover the same UDN if it moved."""
+    async def ensure_device_identity(self, *, initial: bool = False, force: bool = False) -> bool:
+        """Cache polling checks briefly; always verify before changing renderer state."""
         if not initial and not self.udn:
             return True  # Legacy renderers without a UDN can only be addressed by IP.
         async with self._identity_lock:
-            if self._session is None or time.monotonic() < self._identity_retry_at:
+            if self._session is None:
                 return False
+            endpoint = self.ip, self.port, self.description_url
+            if (
+                not initial
+                and not force
+                and self.device_info is not None
+                and self._verified_endpoint == endpoint
+                and time.monotonic() - self._identity_verified_at < IDENTITY_CACHE_SECONDS
+            ):
+                # Also retry a previously failed persistence callback.
+                self._accept_identity(self.device_info)
+                return True
             try:
                 info = await self._fetch_device_description()
                 self._verify_identity(info)
             except (DLNAClientError, aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+                self._verified_endpoint = None
                 logger.debug(f"Renderer identity check failed at {self.ip}: {e}")
                 if not self.udn:
                     return False
-                rediscovered = await self._rediscover_identity()
-                if rediscovered is None:
+                # Throttle multicast scans, never attempts to reach the last
+                # endpoint: a transient description error may clear immediately.
+                rediscovered = None
+                if time.monotonic() >= self._identity_retry_at:
                     self._identity_retry_at = time.monotonic() + IDENTITY_RETRY_SECONDS
+                    rediscovered = await self._rediscover_identity()
+                if rediscovered is None:
                     return False
                 info = rediscovered
             self._identity_retry_at = 0.0
             self._accept_identity(info)
+            self._identity_verified_at = time.monotonic()
+            self._verified_endpoint = self.ip, self.port, self.description_url
             return True
 
     async def _rediscover_identity(self) -> Optional[DLNADeviceInfo]:
@@ -940,8 +961,17 @@ class DLNAClient:
         last_error_code: Optional[int] = None
         last_error_desc: Optional[str] = None
         for attempt in range(retries):
-            if not await self.ensure_device_identity():
-                return SoapResult(success=False)
+            # Cached reads avoid multiplying background polling traffic. Writes
+            # still require a fresh identity: another renderer can inherit an IP
+            # and successfully accept SOAP without producing a network error.
+            if not await self.ensure_device_identity(
+                force=attempt > 0 or not action.startswith("Get")
+            ):
+                last_error = "Renderer identity could not be verified"
+                if attempt < retries - 1:
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                    continue
+                break
             if self.udn and self.device_info:
                 url = {
                     UPNP_AV_TRANSPORT: self.device_info.av_transport_url,

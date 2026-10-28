@@ -300,8 +300,8 @@ async def test_real_http_controls_follow_identity_when_old_endpoint_is_reassigne
                 return_value=[candidate],
             ):
                 try:
-                    assert await client.get_volume() == 31
                     assert await client.set_volume(27)
+                    assert await client.get_volume() == 31
                     assert old_controls == []
                     assert len(new_controls) == 2
                     assert client.port == new.port
@@ -323,7 +323,6 @@ async def test_real_http_does_not_control_a_different_renderer_when_original_is_
             return_value=[],
         ):
             try:
-                assert await client.get_volume() is None
                 assert not await client.set_volume(27)
                 assert controls == []
             finally:

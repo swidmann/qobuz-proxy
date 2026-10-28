@@ -772,6 +772,7 @@ class QobuzProxy:
 
         speaker_id = slugify_name(config.name)
         attempt = 0
+        speaker: Optional[Speaker] = None
         try:
             while True:
                 await asyncio.sleep(retry_delay(attempt))
@@ -784,28 +785,37 @@ class QobuzProxy:
                         return  # Logged out, removed, or superseded by an edit.
 
                     speaker = self._make_speaker(config)
-                    try:
-                        started = await speaker.start()
-                    except asyncio.CancelledError:
-                        await speaker.stop()
-                        raise
-                    except Exception as e:
-                        logger.debug(f"Speaker '{config.name}' retry raised: {e}")
-                        started = False
+                    client = self._api_client
 
-                    if started:
+                try:
+                    started = await speaker.start()
+                except Exception as e:
+                    logger.debug(f"Speaker '{config.name}' retry raised: {e}")
+                    started = False
+
+                async with self._lifecycle_lock:
+                    current = self._api_client is client and any(
+                        sc is config for sc in self._config.speakers
+                    )
+                    if started and current:
                         self._speakers.append(speaker)
+                        speaker = None  # Ownership transfers to the running list.
                         logger.info(
                             f"Speaker '{config.name}' started after {attempt} retry attempt(s)"
                         )
                         return
-                    await speaker.stop()
+                await speaker.stop()
+                speaker = None
+                if not current:
+                    return
 
                 logger.info(
                     f"Speaker '{config.name}' still failing to start "
                     f"(attempt {attempt}) — next retry in {retry_delay(attempt):.0f}s"
                 )
         finally:
+            if speaker is not None:
+                await speaker.stop()
             if self._speaker_retry_tasks.get(speaker_id) is asyncio.current_task():
                 self._speaker_retry_tasks.pop(speaker_id, None)
 

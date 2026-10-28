@@ -170,3 +170,28 @@ async def test_overlapping_edits_leave_only_latest_speaker_running(proxy):
     first.stop.assert_awaited_once()
     assert proxy._speakers == [second]
     assert proxy._config.speakers[0].max_quality == 7
+
+
+async def test_offline_retry_does_not_hold_up_removing_another_speaker(proxy):
+    entered = asyncio.Event()
+    other = SpeakerConfig(name="Kitchen", backend_type="stub", http_port=8691)
+    proxy._config.speakers.append(other)
+    pending = make_speaker()
+
+    async def slow_start():
+        entered.set()
+        await asyncio.Event().wait()
+
+    pending.start.side_effect = slow_start
+    with (
+        patch("qobuz_proxy.app.Speaker", return_value=pending),
+        patch("qobuz_proxy.app.SPEAKER_RETRY_DELAYS_SECONDS", (0.001,)),
+    ):
+        proxy._schedule_speaker_retry(proxy._config.speakers[0])
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            await asyncio.wait_for(proxy._on_remove_speaker("kitchen"), 0.5)
+            assert [sc.name for sc in proxy._config.speakers] == ["Office"]
+        finally:
+            await proxy._stop_speakers()
+    pending.stop.assert_awaited_once()

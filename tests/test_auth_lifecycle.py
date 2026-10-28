@@ -12,6 +12,7 @@ from qobuz_proxy.app import QobuzProxy
 from qobuz_proxy.auth import clear_user_token, save_user_token
 from qobuz_proxy.config import Config, SpeakerConfig
 from qobuz_proxy.webui.routes import register_routes
+from tests.webui.helpers import authorize, oauth_callback
 
 
 @pytest.fixture
@@ -147,6 +148,7 @@ async def test_oauth_save_failure_redirects_to_useful_error():
     app["on_auth_token"] = callback
     register_routes(app)
     async with TestClient(TestServer(app)) as client:
+        authorize(client)
         with (
             patch("qobuz_proxy.webui.routes.extract_code", return_value="fake-code"),
             patch(
@@ -156,7 +158,9 @@ async def test_oauth_save_failure_redirects_to_useful_error():
                 ),
             ),
         ):
-            response = await client.get("/auth/callback?code=fake-code", allow_redirects=False)
+            response = await client.get(
+                (await oauth_callback(client)) + "?code=fake-code", allow_redirects=False
+            )
             assert response.status == 302
             assert response.headers["Location"] == "/?error=save_failed"
 
@@ -166,6 +170,7 @@ async def test_logout_api_reports_failure():
     app["on_logout"] = AsyncMock(side_effect=OSError("/private/path"))
     register_routes(app)
     async with TestClient(TestServer(app)) as client:
+        authorize(client)
         response = await client.post("/api/auth/logout")
         assert response.status == 500
         assert "sign out" in (await response.json())["error"].lower()

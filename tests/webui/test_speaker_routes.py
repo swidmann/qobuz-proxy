@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from qobuz_proxy.webui.routes import register_routes
+from tests.webui.helpers import authorize
 
 
 def make_app() -> web.Application:
@@ -25,6 +26,7 @@ def make_app() -> web.Application:
 @pytest.fixture
 async def client():
     async with TestClient(TestServer(make_app())) as c:
+        authorize(c)
         yield c
 
 
@@ -84,6 +86,7 @@ class TestDiscoverAudioDevices:
         app = make_app()
         app["local_audio_enabled"] = True
         async with TestClient(TestServer(app)) as c:
+            authorize(c)
             mock_device = AsyncMock()
             mock_device.index = 0
             mock_device.name = "Built-in Output"

@@ -11,6 +11,7 @@ from qobuz_proxy.app import QobuzProxy
 from qobuz_proxy.config import Config, SpeakerConfig, load_config
 from qobuz_proxy.webui.config_writer import save_config
 from qobuz_proxy.webui.routes import register_routes
+from tests.webui.helpers import authorize
 
 
 @pytest.fixture
@@ -134,6 +135,7 @@ async def test_api_reports_save_failure_without_exposing_local_paths(proxy, oper
     app["on_remove_speaker"] = proxy._on_remove_speaker
     register_routes(app)
     async with TestClient(TestServer(app)) as client:
+        authorize(client)
         with patch("qobuz_proxy.app.save_config", side_effect=PermissionError("/private/path")):
             if operation == "add":
                 response = await client.post(
@@ -156,6 +158,7 @@ async def test_api_rejects_malformed_speaker_body(body):
     app["on_edit_speaker"] = callback
     register_routes(app)
     async with TestClient(TestServer(app)) as client:
+        authorize(client)
         for method, url in [(client.post, "/api/speakers"), (client.put, "/api/speakers/office")]:
             response = await method(url, json=body)
             assert response.status == 400

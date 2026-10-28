@@ -1,6 +1,17 @@
 (function () {
     "use strict";
 
+    function adminFetch(url, options) {
+        options = options || {};
+        if (options.method && options.method !== "GET") {
+            options.headers = Object.assign({}, options.headers, {
+                "Content-Type": "application/json",
+                "X-Qobuz-CSRF": document.querySelector('meta[name="qobuz-csrf"]').content
+            });
+        }
+        return fetch(url, options);
+    }
+
     var pollTimer = null;
     var editingSpeakerId = null;
     var lastSpeakersJson = null;
@@ -51,7 +62,7 @@
     }
 
     function logout() {
-        fetch("api/auth/logout", { method: "POST" })
+        adminFetch("api/auth/logout", { method: "POST" })
             .then(function (response) {
                 if (!response.ok) throw new Error("Could not sign out. Please try again.");
                 showAuthState("disconnected");
@@ -196,7 +207,7 @@
 
             // Album art
             if (np.album_art_url) {
-                html += '<img class="speaker-album-art" src="' + escapeHtml(np.album_art_url) + '" alt="Album art">';
+                html += '<img class="speaker-album-art" src="' + escapeAttr(np.album_art_url) + '" alt="Album art">';
             } else {
                 html += '<div class="speaker-album-art-placeholder">&#9835;</div>';
             }
@@ -271,28 +282,28 @@
 
         html += '<div class="form-group">';
         html += '<label>Name</label>';
-        html += '<input type="text" id="edit-name" value="' + escapeHtml(s.name) + '">';
+        html += '<input type="text" id="edit-name" value="' + escapeAttr(s.name) + '">';
         html += '</div>';
 
         var cfg = s.config || {};
         if (s.backend === "dlna") {
             html += '<div class="form-group">';
             html += '<label>IP Address</label>';
-            html += '<input type="text" id="edit-dlna-ip" value="' + escapeHtml(cfg.dlna_ip || "") + '" placeholder="192.168.1.x">';
+            html += '<input type="text" id="edit-dlna-ip" value="' + escapeAttr(cfg.dlna_ip || "") + '" placeholder="192.168.1.x">';
             html += '</div>';
             html += '<div class="form-group">';
             html += '<label>Port</label>';
-            html += '<input type="number" id="edit-dlna-port" value="' + escapeHtml(String(cfg.dlna_port || 1400)) + '">';
+            html += '<input type="number" id="edit-dlna-port" value="' + escapeAttr(String(cfg.dlna_port || 1400)) + '">';
             html += '</div>';
             html += '<div class="form-group">';
             html += '<label>Description URL (optional)</label>';
-            html += '<input type="text" id="edit-dlna-url" value="' + escapeHtml(cfg.description_url || "") + '" placeholder="http://192.168.1.x:1400/xml/device_description.xml">';
+            html += '<input type="text" id="edit-dlna-url" value="' + escapeAttr(cfg.description_url || "") + '" placeholder="http://192.168.1.x:1400/xml/device_description.xml">';
             html += '</div>';
             html += '<div class="form-group"><label><input type="checkbox" id="edit-fixed-vol" style="width:auto;display:inline;margin-right:6px;"' + (cfg.fixed_volume ? ' checked' : '') + '> Fixed volume</label></div>';
         } else if (s.backend === "local") {
             html += '<div class="form-group">';
             html += '<label>Audio Device (leave blank for default)</label>';
-            html += '<input type="text" id="edit-audio-device" value="' + escapeHtml(cfg.audio_device || "") + '" placeholder="default">';
+            html += '<input type="text" id="edit-audio-device" value="' + escapeAttr(cfg.audio_device || "") + '" placeholder="default">';
             html += '</div>';
         }
 
@@ -463,7 +474,7 @@
         }
         if (rescanBtn) rescanBtn.disabled = true;
 
-        fetch("api/discover/dlna", {
+        adminFetch("api/discover/dlna", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ timeout: 5 }),
@@ -484,7 +495,6 @@
                     var html = "";
                     for (var i = 0; i < devices.length; i++) {
                         var d = devices[i];
-                        var encoded = escapeHtml(JSON.stringify(d).replace(/'/g, "&#39;"));
                         html += '<div class="device-item" id="di-' + i + '" onclick="selectDLNADevice(' + i + ')">';
                         html += '<div class="device-item-name">' + escapeHtml(d.friendly_name || d.name || "Unknown") + '</div>';
                         if (d.location || d.url) {
@@ -506,7 +516,7 @@
     }
 
     function startAudioDeviceDiscovery() {
-        fetch("api/discover/audio-devices")
+        adminFetch("api/discover/audio-devices")
             .then(function (r) {
                 if (r.status === 404) throw new Error("not_supported");
                 return r.json();
@@ -606,25 +616,25 @@
 
         html += '<div class="form-group">';
         html += '<label>Speaker name</label>';
-        html += '<input type="text" id="new-speaker-name" value="' + escapeHtml(defaultName) + '" placeholder="My Speaker">';
+        html += '<input type="text" id="new-speaker-name" value="' + escapeAttr(defaultName) + '" placeholder="My Speaker">';
         html += '</div>';
 
         if (backend === "dlna") {
             html += '<div class="form-row">';
             html += '<div class="form-group" style="flex:2;"><label>IP Address</label>';
-            html += '<input type="text" id="new-dlna-ip" value="' + escapeHtml(defaultIp) + '" placeholder="192.168.1.50"></div>';
+            html += '<input type="text" id="new-dlna-ip" value="' + escapeAttr(defaultIp) + '" placeholder="192.168.1.50"></div>';
             html += '<div class="form-group" style="flex:1;"><label>Port</label>';
-            html += '<input type="text" id="new-dlna-port" value="' + defaultPort + '"></div>';
+            html += '<input type="text" id="new-dlna-port" value="' + escapeAttr(String(defaultPort)) + '"></div>';
             html += '</div>';
             html += '<div class="form-group">';
             html += '<label>Description URL <span style="color:#666">(optional — auto-discovered if empty)</span></label>';
-            html += '<input type="text" id="new-dlna-url" value="' + escapeHtml(defaultUrl) + '" placeholder="Leave empty for auto-discovery">';
+            html += '<input type="text" id="new-dlna-url" value="' + escapeAttr(defaultUrl) + '" placeholder="Leave empty for auto-discovery">';
             html += '</div>';
             html += '<div class="form-group"><label><input type="checkbox" id="new-fixed-vol" style="width:auto;display:inline;margin-right:6px;"> Fixed volume</label></div>';
         } else if (backend === "local") {
             html += '<div class="form-group">';
             html += '<label>Audio device (leave blank for default)</label>';
-            html += '<input type="text" id="new-audio-device" value="' + escapeHtml(defaultDevice) + '" placeholder="default">';
+            html += '<input type="text" id="new-audio-device" value="' + escapeAttr(defaultDevice) + '" placeholder="default">';
             html += '</div>';
         }
 
@@ -689,7 +699,7 @@
             submitBtn.textContent = "Adding…";
         }
 
-        fetch("api/speakers", {
+        adminFetch("api/speakers", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -771,7 +781,7 @@
             submitBtn.textContent = "Saving…";
         }
 
-        fetch("api/speakers/" + encodeURIComponent(id), {
+        adminFetch("api/speakers/" + encodeURIComponent(id), {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
@@ -806,7 +816,7 @@
     function removeSpeaker(id) {
         if (!confirm("Remove this speaker?")) return;
 
-        fetch("api/speakers/" + encodeURIComponent(id), { method: "DELETE" })
+        adminFetch("api/speakers/" + encodeURIComponent(id), { method: "DELETE" })
             .then(function (r) {
                 if (!r.ok) {
                     return r.json().then(function (d) { throw new Error(d.error || "Failed to remove speaker"); });
@@ -841,7 +851,7 @@
     // -------------------------------------------------------------------------
 
     function fetchStatus() {
-        fetch("api/status")
+        adminFetch("api/status")
             .then(function (response) {
                 if (!response.ok) throw new Error("HTTP " + response.status);
                 return response.json();
@@ -905,6 +915,7 @@
         var error = params.get("error");
         if (error) {
             var messages = {
+                invalid_state: "This login expired or was not started here. Please sign in again.",
                 missing_code: "Login was cancelled or the authorization code was missing.",
                 exchange_failed: "Failed to exchange authorization code. Please try again.",
                 auth_failed: "Authentication failed. Please try again.",
@@ -914,7 +925,7 @@
             errorEl.textContent = messages[error] || "Login failed. Please try again.";
             errorEl.style.display = "";
             // Clean up URL
-            window.history.replaceState({}, "", "/");
+            window.history.replaceState({}, "", document.baseURI);
         }
     })();
 

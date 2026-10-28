@@ -87,6 +87,11 @@ qobuz-proxy
 
 Open **http://localhost:8689**, authenticate, and add speakers from the UI. Speaker configuration is saved to `config.yaml` in the current directory automatically.
 
+Administration is available only on the computer running the proxy. Open it with
+`localhost` or `127.0.0.1`. Qobuz Connect discovery and audio streaming remain
+available on the local network. Browser requests that change settings require the
+page's session token, and Qobuz sign-in must finish in the browser that started it.
+
 To use a pre-existing config file: `qobuz-proxy --config /path/to/config.yaml`
 
 ### Authentication

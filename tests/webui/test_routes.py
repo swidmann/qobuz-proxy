@@ -7,6 +7,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from qobuz_proxy.webui.routes import register_routes
+from tests.webui.helpers import authorize, oauth_callback
 
 
 def make_app(auth_state: dict | None = None) -> web.Application:
@@ -26,6 +27,7 @@ def make_app(auth_state: dict | None = None) -> web.Application:
 async def client():
     app = make_app()
     async with TestClient(TestServer(app)) as c:
+        authorize(c)
         yield c
 
 
@@ -52,6 +54,7 @@ async def authed_client():
         }
     ]
     async with TestClient(TestServer(app)) as c:
+        authorize(c)
         yield c
 
 
@@ -83,13 +86,17 @@ async def test_status_authenticated(authed_client: TestClient) -> None:
 
 
 async def test_auth_login_redirects_to_qobuz(client: TestClient) -> None:
-    resp = await client.get("/auth/login?origin=http://localhost:8689", allow_redirects=False)
+    resp = await client.get(
+        "/auth/login",
+        params={"origin": str(client.make_url("/")).rstrip("/")},
+        allow_redirects=False,
+    )
     assert resp.status == 302
     location = resp.headers["Location"]
     assert "qobuz.com/signin/oauth" in location
     assert "ext_app_id=304027809" in location
     assert "redirect_url=" in location
-    assert "localhost%3A8689" in location or "localhost:8689" in location
+    assert "127.0.0.1" in location
 
 
 async def test_auth_login_missing_origin(client: TestClient) -> None:
@@ -110,7 +117,9 @@ async def test_auth_callback_success(client: TestClient) -> None:
         new_callable=AsyncMock,
         return_value=mock_creds,
     ):
-        resp = await client.get("/auth/callback?code_autorisation=test-code", allow_redirects=False)
+        resp = await client.get(
+            (await oauth_callback(client)) + "?code_autorisation=test-code", allow_redirects=False
+        )
     assert resp.status == 302
     assert resp.headers["Location"] == "/"
     client.app["on_auth_token"].assert_awaited_once_with(  # type: ignore[union-attr]
@@ -122,7 +131,7 @@ async def test_auth_callback_success(client: TestClient) -> None:
 
 
 async def test_auth_callback_missing_code(client: TestClient) -> None:
-    resp = await client.get("/auth/callback", allow_redirects=False)
+    resp = await client.get(await oauth_callback(client), allow_redirects=False)
     assert resp.status == 302
     assert "error=missing_code" in resp.headers["Location"]
 
@@ -133,7 +142,9 @@ async def test_auth_callback_exchange_failure(client: TestClient) -> None:
         new_callable=AsyncMock,
         side_effect=RuntimeError("Token exchange failed"),
     ):
-        resp = await client.get("/auth/callback?code_autorisation=bad-code", allow_redirects=False)
+        resp = await client.get(
+            (await oauth_callback(client)) + "?code_autorisation=bad-code", allow_redirects=False
+        )
     assert resp.status == 302
     assert "error=exchange_failed" in resp.headers["Location"]
 
@@ -152,7 +163,9 @@ async def test_auth_callback_auth_failure(client: TestClient) -> None:
         new_callable=AsyncMock,
         return_value=mock_creds,
     ):
-        resp = await client.get("/auth/callback?code_autorisation=test-code", allow_redirects=False)
+        resp = await client.get(
+            (await oauth_callback(client)) + "?code_autorisation=test-code", allow_redirects=False
+        )
     assert resp.status == 302
     assert "error=auth_failed" in resp.headers["Location"]
 
@@ -200,7 +213,7 @@ async def test_auth_callback_redirects_under_ingress(client: TestClient) -> None
         return_value=mock_creds,
     ):
         resp = await client.get(
-            "/auth/callback?code_autorisation=test-code",
+            (await oauth_callback(client)) + "?code_autorisation=test-code",
             headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
             allow_redirects=False,
         )
@@ -211,7 +224,7 @@ async def test_auth_callback_redirects_under_ingress(client: TestClient) -> None
 async def test_auth_callback_error_redirects_under_ingress(client: TestClient) -> None:
     """Error redirects should also stay within the ingress base path."""
     resp = await client.get(
-        "/auth/callback",
+        await oauth_callback(client, "/api/hassio_ingress/abc123"),
         headers={"X-Ingress-Path": "/api/hassio_ingress/abc123"},
         allow_redirects=False,
     )

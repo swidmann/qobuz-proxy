@@ -627,13 +627,13 @@ class QobuzProxy:
         await self._web_runner.setup()
         self._web_site = web.TCPSite(
             self._web_runner,
-            self._config.server.bind_address,
+            "127.0.0.1",
             self._config.server.http_port,
         )
         await self._web_site.start()
         logger.info(
             f"Web server listening on "
-            f"{self._config.server.bind_address}:{self._config.server.http_port}"
+            f"127.0.0.1:{self._config.server.http_port}"
         )
 
     async def _stop_web_server(self) -> None:

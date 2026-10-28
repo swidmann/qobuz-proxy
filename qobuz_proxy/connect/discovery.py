@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import socket
+import sys
 from typing import Any, Callable, Optional
 
 from aiohttp import web
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 # mDNS constants
 MDNS_SERVICE_TYPE = "_qobuz-connect._tcp.local."
 SDK_VERSION = "py-1.0.0"
+MDNS_REFRESH_INTERVAL_SECONDS = 5.0
 
 # Quality ID to HTTP display string mapping
 QUALITY_TO_HTTP = {
@@ -105,6 +107,7 @@ class DiscoveryService:
         # mDNS components
         self._zeroconf: Optional[Zeroconf] = None
         self._service_info: Optional[ServiceInfo] = None
+        self._mdns_refresh_task: Optional[asyncio.Task[None]] = None
 
         # State
         self._current_session_id: str = ""
@@ -320,13 +323,42 @@ class DiscoveryService:
             f"Registered mDNS service: {self.config.device.name} "
             f"(as {sanitized_name}) at {local_ip}:{self.config.server.http_port}"
         )
+        if sys.platform == "darwin":
+            self._mdns_refresh_task = asyncio.create_task(self._refresh_mdns())
+
+    async def _refresh_mdns(self) -> None:
+        """Keep speakers visible to Qobuz desktop running on the same Mac.
+
+        Its discovery queries disable multicast loopback, so a local proxy
+        cannot reply to them. Refresh before the app expires an unresponsive
+        renderer after a few missed queries.
+        """
+        while True:
+            await asyncio.sleep(MDNS_REFRESH_INTERVAL_SECONDS)
+            if self._zeroconf is None or self._service_info is None:
+                return
+            try:
+                broadcast = await self._zeroconf.async_update_service(self._service_info)
+                await broadcast
+            except Exception as e:
+                logger.warning(f"Failed to refresh mDNS service {self.config.device.name}: {e}")
 
     async def _unregister_mdns(self) -> None:
         """Unregister mDNS service."""
+        task, self._mdns_refresh_task = self._mdns_refresh_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
         if self._zeroconf and self._service_info:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self._zeroconf.unregister_service, self._service_info)
             await loop.run_in_executor(None, self._zeroconf.close)
+            self._zeroconf = None
+            self._service_info = None
             logger.debug("Unregistered mDNS service")
 
     def _get_local_ip(self) -> Optional[str]:

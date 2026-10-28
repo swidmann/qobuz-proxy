@@ -1,7 +1,8 @@
-"""Discovery must advertise and receive queries on the same LAN interface."""
+"""Discovery stays visible to clients on the LAN and on its own Mac."""
 
+import asyncio
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +53,7 @@ async def test_conflicting_service_reuses_the_scoped_socket():
         await discovery._register_mdns()
         zeroconf.assert_called_once_with(interfaces=["10.0.1.9"])
         assert zc.register_service.call_args.kwargs == {"cooperating_responders": True}
+        await discovery._unregister_mdns()
 
 
 @pytest.mark.parametrize(
@@ -73,3 +75,113 @@ async def test_device_type_is_advertised(device_type, expected):
         await discovery._register_mdns()
         info = zeroconf.return_value.register_service.call_args.args[0]
         assert info.properties[b"type"].decode() == expected
+        await discovery._unregister_mdns()
+
+
+@pytest.fixture
+async def mac_discovery(monkeypatch):
+    monkeypatch.setattr("qobuz_proxy.connect.discovery.sys.platform", "darwin")
+    monkeypatch.setattr("qobuz_proxy.connect.discovery.MDNS_REFRESH_INTERVAL_SECONDS", 0.01)
+    discovery = DiscoveryService(Config(), "test")
+    refreshed = asyncio.Queue()
+
+    async def refresh(info):
+        refreshed.put_nowait(info)
+        broadcast = asyncio.get_running_loop().create_future()
+        broadcast.set_result(None)
+        return broadcast
+
+    zc = MagicMock()
+    zc.async_update_service = AsyncMock(side_effect=refresh)
+    with (
+        patch.object(discovery, "_get_local_ip", return_value="10.0.1.9"),
+        patch("qobuz_proxy.connect.discovery.Zeroconf", return_value=zc),
+    ):
+        await discovery._register_mdns()
+        try:
+            yield discovery, zc, refreshed
+        finally:
+            await discovery._unregister_mdns()
+
+
+async def test_mac_refreshes_announcements_without_client_queries(mac_discovery):
+    discovery, zc, refreshed = mac_discovery
+    info = zc.register_service.call_args.args[0]
+    assert await asyncio.wait_for(refreshed.get(), 1) is info
+    assert await asyncio.wait_for(refreshed.get(), 1) is info
+    zc.register_service.assert_called_once()
+    assert not discovery._mdns_refresh_task.done()
+
+
+async def test_refresh_failure_does_not_stop_later_announcements(mac_discovery, caplog):
+    discovery, zc, refreshed = mac_discovery
+    refresh = zc.async_update_service.side_effect
+    failed = False
+
+    async def fail_once(info):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("temporary network failure")
+        return await refresh(info)
+
+    zc.async_update_service.side_effect = fail_once
+    await asyncio.wait_for(refreshed.get(), 1)
+    assert "temporary network failure" in caplog.text
+    assert zc.async_update_service.await_count >= 2
+    assert not discovery._mdns_refresh_task.done()
+
+
+async def test_stop_cancels_inflight_broadcast_before_goodbye(mac_discovery):
+    discovery, zc, _ = mac_discovery
+    started = asyncio.Event()
+    broadcast = asyncio.get_running_loop().create_future()
+
+    async def refresh(info):
+        started.set()
+        return broadcast
+
+    def goodbye(info):
+        assert broadcast.cancelled()
+
+    zc.async_update_service.side_effect = refresh
+    zc.unregister_service.side_effect = goodbye
+    await asyncio.wait_for(started.wait(), 1)
+    task = discovery._mdns_refresh_task
+
+    await discovery._unregister_mdns()
+
+    assert task.done()
+    assert discovery._mdns_refresh_task is None
+    assert discovery._zeroconf is None
+    assert discovery._service_info is None
+    calls = zc.async_update_service.await_count
+    await asyncio.sleep(0.03)
+    assert zc.async_update_service.await_count == calls
+    zc.unregister_service.assert_called_once()
+
+
+async def test_restart_replaces_the_refresh_task(mac_discovery):
+    discovery, _, refreshed = mac_discovery
+    previous = discovery._mdns_refresh_task
+    await discovery._unregister_mdns()
+    await discovery._register_mdns()
+
+    assert previous.done()
+    assert discovery._mdns_refresh_task is not previous
+    await asyncio.wait_for(refreshed.get(), 1)
+
+
+async def test_linux_keeps_query_driven_announcements(monkeypatch):
+    monkeypatch.setattr("qobuz_proxy.connect.discovery.sys.platform", "linux")
+    discovery = DiscoveryService(Config(), "test")
+    with (
+        patch.object(discovery, "_get_local_ip", return_value="10.0.1.9"),
+        patch("qobuz_proxy.connect.discovery.Zeroconf") as zeroconf,
+    ):
+        await discovery._register_mdns()
+        try:
+            assert discovery._mdns_refresh_task is None
+            zeroconf.return_value.async_update_service.assert_not_called()
+        finally:
+            await discovery._unregister_mdns()

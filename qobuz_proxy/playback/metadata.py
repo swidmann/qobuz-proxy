@@ -34,6 +34,17 @@ class AudioQuality:
         """Get human-readable name for quality ID."""
         return cls.NAMES.get(quality_id, f"Unknown ({quality_id})")
 
+    @classmethod
+    def stream_name(cls, quality_id: int, sample_rate: int, bit_depth: int) -> str:
+        """Describe returned media without presenting a format ceiling as its resolution."""
+        if quality_id == cls.MP3_320:
+            return cls.get_name(quality_id)
+        if sample_rate > 0 and bit_depth > 0:
+            return f"FLAC {bit_depth}-bit/{sample_rate / 1000:g}kHz"
+        return (
+            "FLAC Hi-Res" if quality_id in (7, 27) else "FLAC CD" if quality_id == 6 else "Unknown"
+        )
+
 
 @dataclass
 class TrackMetadata:
@@ -64,7 +75,11 @@ class TrackMetadata:
             "duration_ms": self.duration_ms,
             "artwork_url": self.artwork_url,
             "quality": self.actual_quality,
-            "quality_name": AudioQuality.get_name(self.actual_quality),
+            "quality_name": AudioQuality.stream_name(
+                self.actual_quality, self.sample_rate, self.bit_depth
+            ),
+            "sample_rate": self.sample_rate,
+            "bit_depth": self.bit_depth,
         }
 
     def is_url_expired(self, buffer_s: int = 30) -> bool:
@@ -128,7 +143,13 @@ class MetadataService:
     # Kept short so a transient API/network failure is retried soon.
     UNAVAILABLE_RETRY_SECONDS = 30.0
 
-    def __init__(self, api_client: "QobuzAPIClient", max_quality: int = 27):
+    def __init__(
+        self,
+        api_client: "QobuzAPIClient",
+        max_quality: int = 27,
+        max_sample_rate: int = 0,
+        max_bit_depth: int = 0,
+    ):
         """
         Initialize metadata service.
 
@@ -138,6 +159,8 @@ class MetadataService:
         """
         self._api = api_client
         self._max_quality = max_quality
+        self._max_sample_rate = max_sample_rate
+        self._max_bit_depth = max_bit_depth
         self._cache = MetadataCache()
         # track_id -> monotonic time until which the track is considered unavailable
         self._unavailable_until: dict[str, float] = {}
@@ -328,15 +351,35 @@ class MetadataService:
             for quality in qualities:
                 result = await self._api.get_track_url(metadata.track_id, quality)
                 if result:
+                    sr = result.get("sampling_rate", 0)
+                    sample_rate = int(float(sr) * 1000) if sr else 0
+                    bit_depth = int(result.get("bit_depth", 0))
+                    actual_quality = int(result.get("format_id", quality))
+                    if actual_quality != AudioQuality.MP3_320:
+                        if (
+                            self._max_sample_rate
+                            and (
+                                sample_rate > self._max_sample_rate
+                                or (not sample_rate and actual_quality in (7, 27))
+                            )
+                        ) or (
+                            self._max_bit_depth
+                            and (
+                                bit_depth > self._max_bit_depth
+                                or (not bit_depth and actual_quality in (7, 27))
+                            )
+                        ):
+                            logger.info(
+                                f"Track {metadata.track_id}: returned format exceeds renderer limits; trying lower quality"
+                            )
+                            continue
                     metadata.streaming_url = result["url"]
                     metadata.streaming_url_expires_at = int(time.time()) + self.URL_TTL_SECONDS
                     # Use the actual format_id from API response (may differ from requested)
-                    actual_quality = result.get("format_id", quality)
                     metadata.actual_quality = actual_quality
                     # sampling_rate from Qobuz API is in kHz (e.g. 44.1, 96.0, 192.0)
-                    sr = result.get("sampling_rate", 0)
-                    metadata.sample_rate = int(float(sr) * 1000) if sr else 0
-                    metadata.bit_depth = int(result.get("bit_depth", 0))
+                    metadata.sample_rate = sample_rate
+                    metadata.bit_depth = bit_depth
                     metadata.blob = result.get("blob", "") or ""
                     self._unavailable_until.pop(metadata.track_id, None)
 

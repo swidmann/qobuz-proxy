@@ -253,6 +253,11 @@
             }
             if (cfg.effective_quality) {
                 var qText = qualityLabel(cfg.effective_quality);
+                if (cfg.effective_quality >= 7 && cfg.max_sample_rate && cfg.max_bit_depth) {
+                    var ceiling = cfg.effective_quality === 7 ? 96000 : 192000;
+                    qText = "Up to " + cfg.max_bit_depth + "-bit/" +
+                        (Math.min(ceiling, cfg.max_sample_rate) / 1000) + "kHz";
+                }
                 if (cfg.max_quality === "auto") {
                     qText += " (auto)";
                 }

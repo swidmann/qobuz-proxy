@@ -74,7 +74,7 @@ class TestTrackMetadata:
         assert result["duration_ms"] == 180000
         assert result["artwork_url"] == "https://example.com/art.jpg"
         assert result["quality"] == 27
-        assert result["quality_name"] == "FLAC Hi-Res (24-bit/192kHz)"
+        assert result["quality_name"] == "FLAC Hi-Res"
 
     def test_duration_s_property(self) -> None:
         """Test duration_s property conversion."""

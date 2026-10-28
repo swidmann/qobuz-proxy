@@ -176,6 +176,7 @@ class TestSpeakerLifecycle:
         mock_backend = MagicMock(spec=DLNABackend)
         mock_backend.name = "Mock DLNA"
         mock_backend.get_recommended_quality.return_value = 7
+        mock_backend.get_audio_limits.return_value = (48000, 24)
 
         mock_proxy = MagicMock()
         mock_proxy.start = AsyncMock()

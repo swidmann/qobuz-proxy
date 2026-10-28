@@ -367,6 +367,7 @@ class DLNABackend(AudioBackend):
                     self._capabilities,
                     device_info.manufacturer,
                     device_info.model_name,
+                    device_info.software_generation,
                 )
                 # Cache the result
                 _capability_cache.set(device_id, self._capabilities)
@@ -692,6 +693,12 @@ class DLNABackend(AudioBackend):
         if self._capabilities:
             return self._capabilities.max_quality
         return None
+
+    def get_audio_limits(self) -> tuple[int, int]:
+        """Confirmed file limits; zero means no known limit for that dimension."""
+        if self._capabilities and (self._is_sonos or self._capabilities.format_info_confirmed):
+            return self._capabilities.max_sample_rate, self._capabilities.max_bit_depth
+        return (48000, 16) if self._is_sonos else (0, 0)
 
     @property
     def quality_detection_confirmed(self) -> bool:

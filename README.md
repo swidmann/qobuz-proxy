@@ -37,6 +37,12 @@ By default (`max_quality: auto`), QobuzProxy queries your DLNA device's capabili
 | `7` | FLAC Hi-Res (24-bit/96kHz) |
 | `27` | FLAC Hi-Res (24-bit/192kHz) |
 
+For Sonos S2, Auto allows 24-bit FLAC at 44.1 or 48 kHz. Each returned file is
+checked against the renderer's rate and bit-depth limits before delivery; a file
+above those limits falls back to CD quality. S1 and unidentified Sonos software
+remain limited to 16 bits. A manually selected CD setting stays at CD quality.
+The playing-track label shows the returned file's resolution when available.
+
 ## Local Audio Playback
 
 QobuzProxy can also play audio directly through your machine's speakers or DAC, without needing a DLNA device. Set the `QOBUZPROXY_BACKEND` environment variable to `local`:

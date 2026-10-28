@@ -79,6 +79,7 @@ class DLNADeviceInfo:
     av_transport_url: str = ""
     rendering_control_url: str = ""
     connection_manager_url: str = ""
+    software_generation: int = 0  # Sonos swGen: 1 = S1, 2 = S2; 0 = unknown.
 
 
 class DLNAClientError(Exception):
@@ -857,6 +858,8 @@ class DLNAClient:
                     info.model_name = elem.text or ""
                 elif tag == "UDN" and not info.udn:
                     info.udn = elem.text or ""
+                elif tag == "swGen" and (elem.text or "").strip() in ("1", "2"):
+                    info.software_generation = int((elem.text or "").strip())
 
             # Find service URLs
             for service in root.iter():

@@ -68,7 +68,7 @@ class DLNACapabilities:
             return QOBUZ_QUALITY_MP3
         if self.max_bit_depth >= 24 and self.max_sample_rate >= 192000:
             return QOBUZ_QUALITY_192K
-        if self.max_bit_depth >= 24 and self.max_sample_rate >= 96000:
+        if self.max_bit_depth >= 24:
             return QOBUZ_QUALITY_96K
         return QOBUZ_QUALITY_CD
 
@@ -295,13 +295,9 @@ def build_protocol_info(
     return f"http-get:*:{mime}:DLNA.ORG_OP=01"
 
 
-# Known device limitations
-DEVICE_OVERRIDES: dict[str, dict[str, int]] = {
-    "Sonos": {"max_sample_rate": 48000, "max_bit_depth": 16},
-}
-
-
-def apply_device_overrides(caps: DLNACapabilities, manufacturer: str, model: str) -> None:
+def apply_device_overrides(
+    caps: DLNACapabilities, manufacturer: str, model: str, software_generation: int = 0
+) -> None:
     """
     Apply known device-specific limitations.
 
@@ -314,12 +310,12 @@ def apply_device_overrides(caps: DLNACapabilities, manufacturer: str, model: str
         model: Device model string
     """
     device_str = f"{manufacturer} {model}".lower()
-    for pattern, overrides in DEVICE_OVERRIDES.items():
-        if pattern.lower() in device_str:
-            logger.info(f"Applying {pattern} overrides: {overrides}")
-            for k, v in overrides.items():
-                setattr(caps, k, v)
-            break
+    if "sonos" in device_str:
+        caps.max_sample_rate = 48000
+        caps.max_bit_depth = 24 if software_generation == 2 else 16
+        if software_generation in (1, 2):
+            caps.format_info_confirmed = True
+        return
 
 
 # Capability cache

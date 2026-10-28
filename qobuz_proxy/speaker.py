@@ -84,6 +84,7 @@ class Speaker:
 
         # Effective quality (may differ from config when AUTO_QUALITY is resolved)
         self._effective_quality: int = config.max_quality
+        self._audio_limits: tuple[int, int] = (0, 0)
         # Where the effective quality came from: "manual", "auto" (detected from
         # the device), or "auto_fallback" (device never said — conservative CD)
         self._quality_source: str = (
@@ -139,6 +140,8 @@ class Speaker:
                 "album": meta.get("album", ""),
                 "album_art_url": meta.get("artwork_url", ""),
                 "quality": meta.get("quality_name", ""),
+                "sample_rate": meta.get("sample_rate", 0),
+                "bit_depth": meta.get("bit_depth", 0),
             }
             # With fixed volume (a DLNA-only setting) the proxy never touches or
             # tracks the renderer's level, so the cached value is just the
@@ -155,6 +158,8 @@ class Speaker:
             "effective_quality": self._effective_quality,
             "quality_source": self._quality_source,
             "device_type": self._config.device_type,
+            "max_sample_rate": self._audio_limits[0],
+            "max_bit_depth": self._audio_limits[1],
         }
         if self._config.backend_type == "dlna":
             config_dict["dlna_ip"] = self._config.dlna_ip
@@ -306,9 +311,15 @@ class Speaker:
 
             # 4. Create metadata service
             logger.debug(f"[{self.name}] Creating metadata service...")
+            sample_rate_limit, bit_depth_limit = (
+                backend.get_audio_limits() if isinstance(backend, DLNABackend) else (0, 0)
+            )
+            self._audio_limits = sample_rate_limit, bit_depth_limit
             self._metadata_service = MetadataService(
                 api_client=self._api_client,
                 max_quality=self._effective_quality,
+                max_sample_rate=sample_rate_limit,
+                max_bit_depth=bit_depth_limit,
             )
 
             # 5. Create and start audio proxy server (DLNA only)

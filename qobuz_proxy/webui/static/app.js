@@ -52,14 +52,15 @@
 
     function logout() {
         fetch("api/auth/logout", { method: "POST" })
-            .then(function () {
+            .then(function (response) {
+                if (!response.ok) throw new Error("Could not sign out. Please try again.");
                 showAuthState("disconnected");
                 lastSpeakersJson = null;
                 document.getElementById("speakers-list").innerHTML =
                     '<p class="muted">Waiting for authentication...</p>';
             })
             .catch(function () {
-                showAuthState("disconnected");
+                showError("Could not sign out. Please try again.");
             });
     }
 
@@ -907,6 +908,7 @@
                 missing_code: "Login was cancelled or the authorization code was missing.",
                 exchange_failed: "Failed to exchange authorization code. Please try again.",
                 auth_failed: "Authentication failed. Please try again.",
+                save_failed: "Could not save your Qobuz login. Your previous connection is unchanged. Please try again.",
             };
             var errorEl = document.getElementById("login-error");
             errorEl.textContent = messages[error] || "Login failed. Please try again.";

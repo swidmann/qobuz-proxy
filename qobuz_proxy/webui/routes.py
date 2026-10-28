@@ -107,9 +107,13 @@ async def _handle_auth_callback(request: web.Request) -> web.Response:
     }
 
     callback = request.app["on_auth_token"]
-    success: bool = await callback(
-        creds["user_id"], creds["user_auth_token"], profile, validated=True
-    )
+    try:
+        success: bool = await callback(
+            creds["user_id"], creds["user_auth_token"], profile, validated=True
+        )
+    except OSError:
+        logger.exception("Could not save Qobuz login")
+        raise web.HTTPFound(f"{base}?error=save_failed")
 
     if not success:
         raise web.HTTPFound(f"{base}?error=auth_failed")
@@ -120,7 +124,11 @@ async def _handle_auth_callback(request: web.Request) -> web.Response:
 async def _handle_logout(request: web.Request) -> web.Response:
     """Clear auth token via callback."""
     callback = request.app["on_logout"]
-    await callback()
+    try:
+        await callback()
+    except OSError:
+        logger.exception("Could not clear Qobuz login")
+        return web.json_response({"error": "Could not sign out. Please try again."}, status=500)
     return web.json_response({"status": "ok"})
 
 

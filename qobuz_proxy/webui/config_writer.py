@@ -29,8 +29,37 @@ def config_to_dict(config: Config) -> dict:
 
 
 def save_config(config: Config, path: Path) -> None:
-    """Persist web UI configuration changes."""
-    _write_yaml(config_to_dict(config), path)
+    """Persist web UI changes while keeping unrelated settings and explicit ports."""
+    data: dict = {}
+    if path.exists():
+        try:
+            with path.open() as f:
+                data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                raise ValueError("Expected a configuration mapping")
+        except (yaml.YAMLError, ValueError) as e:
+            raise OSError("Cannot read saved configuration") from e
+
+    serialized = config_to_dict(config)
+    previous = data.get("speakers") or []
+    # These optional fields can disappear from the serializer when reset.
+    managed = {"device_type", "dlna_description_url", "dlna_udn"}
+    for speaker in serialized["speakers"]:
+        matches = [
+            old
+            for old in previous
+            if (speaker.get("uuid") and old.get("uuid") == speaker["uuid"])
+            or (not old.get("uuid") and old.get("name") == speaker["name"])
+        ]
+        if len(matches) == 1:
+            retained = {k: v for k, v in matches[0].items() if k not in managed}
+            retained.update(speaker)
+            speaker.clear()
+            speaker.update(retained)
+    for section in ("server", "logging"):
+        data.setdefault(section, {}).update(serialized[section])
+    data["speakers"] = serialized["speakers"]
+    _write_yaml(data, path)
 
 
 def persist_speaker_uuids(config: Config, path: Path) -> None:

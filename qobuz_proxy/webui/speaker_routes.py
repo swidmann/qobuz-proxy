@@ -74,6 +74,8 @@ async def _handle_add_speaker(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid_json"}, status=400)
 
+    if not isinstance(body, dict) or not isinstance(body.get("name", ""), str):
+        return web.json_response({"error": "invalid speaker configuration"}, status=400)
     name = body.get("name", "").strip()
     backend = body.get("backend", "dlna")
 
@@ -87,8 +89,13 @@ async def _handle_add_speaker(request: web.Request) -> web.Response:
     try:
         result = await callback(body)
         return web.json_response(result, status=201)
-    except (ValueError, Exception) as e:
+    except (ValueError, TypeError) as e:
         return web.json_response({"error": str(e)}, status=400)
+    except OSError:
+        logger.exception("Failed to save added speaker")
+        return web.json_response(
+            {"error": "Could not save configuration. Please try again."}, status=500
+        )
 
 
 async def _handle_edit_speaker(request: web.Request) -> web.Response:
@@ -100,14 +107,21 @@ async def _handle_edit_speaker(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "invalid_json"}, status=400)
 
+    if not isinstance(body, dict) or not isinstance(body.get("name", ""), str):
+        return web.json_response({"error": "invalid speaker configuration"}, status=400)
     callback = request.app["on_edit_speaker"]
     try:
         result = await callback(speaker_id, body)
         return web.json_response(result)
     except KeyError:
         return web.json_response({"error": "speaker not found"}, status=404)
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         return web.json_response({"error": str(e)}, status=400)
+    except OSError:
+        logger.exception("Failed to save edited speaker")
+        return web.json_response(
+            {"error": "Could not save configuration. Please try again."}, status=500
+        )
 
 
 async def _handle_remove_speaker(request: web.Request) -> web.Response:
@@ -120,6 +134,11 @@ async def _handle_remove_speaker(request: web.Request) -> web.Response:
         return web.Response(status=204)
     except KeyError:
         return web.json_response({"error": "speaker not found"}, status=404)
+    except OSError:
+        logger.exception("Failed to save removed speaker")
+        return web.json_response(
+            {"error": "Could not save configuration. Please try again."}, status=500
+        )
 
 
 def register_speaker_routes(app: web.Application) -> None:

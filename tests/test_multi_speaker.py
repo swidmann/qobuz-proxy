@@ -530,6 +530,7 @@ class TestSpeakerEditCallbacks:
         new_speaker = MagicMock()
         new_speaker.name = "Wyse"
         new_speaker.start = AsyncMock(return_value=False)  # device unreachable
+        new_speaker.stop = AsyncMock()
         new_speaker.get_status.return_value = {"id": "wyse", "status": "disconnected"}
 
         with (
@@ -543,8 +544,10 @@ class TestSpeakerEditCallbacks:
         assert config.speakers[0].max_quality == 27
         assert config.speakers[0].dlna_ip == "192.168.1.60"
         mock_save.assert_called_once()
-        assert app._speakers[0] is new_speaker
-        assert result["status"] == "disconnected"
+        assert app._speakers == []
+        assert result["status"] == "starting"
+        assert "wyse" in app._speaker_retry_tasks
+        await app._stop_speakers()
 
     async def test_edit_toggles_fixed_volume(self):
         """The edit form exposes Fixed volume; the flag must round-trip and survive
@@ -805,6 +808,7 @@ class TestSpeakersApiListsConfig:
 
         speaker = MagicMock()
         speaker.start = AsyncMock(return_value=False)
+        speaker.stop = AsyncMock()
         speaker.get_status.return_value = {"id": "patio", "status": "disconnected"}
 
         with (

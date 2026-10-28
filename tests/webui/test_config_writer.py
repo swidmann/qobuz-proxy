@@ -120,13 +120,13 @@ class TestSaveConfig:
         assert "Living Room" in names
         assert "Headphones" in names
 
-    def test_overwrites_existing_file(self, tmp_path: Path) -> None:
+    def test_preserves_unrelated_settings(self, tmp_path: Path) -> None:
         path = tmp_path / "config.yaml"
         path.write_text("old: data\n")
         config = _make_config_with_dlna_speaker()
         save_config(config, path)
         data = yaml.safe_load(path.read_text())
-        assert "old" not in data
+        assert data["old"] == "data"
         assert "speakers" in data
 
 

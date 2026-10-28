@@ -11,6 +11,7 @@
 <body>
     <div class="container">
         <h1>qobuz-proxy</h1>
+        <div id="login-error" class="error-message" style="display: none;"></div>
 
         <!-- Auth State: Not authenticated -->
         <div id="auth-disconnected" class="card card-error">
@@ -19,7 +20,6 @@
                 <span>Not connected</span>
             </div>
             <p>You need to log in to your Qobuz account to use qobuz-proxy.</p>
-            <div id="login-error" class="error-message" style="display: none;"></div>
             <button onclick="startLogin()">Log in to Qobuz</button>
         </div>
 

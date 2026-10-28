@@ -373,7 +373,7 @@ def _validate_speakers(speakers: list[SpeakerConfig]) -> None:
     if not speakers:
         return  # Empty is valid — speakers can be added at runtime via the web UI
 
-    names = [s.name for s in speakers]
+    names = [slugify_name(s.name) for s in speakers]
     if len(names) != len(set(names)):
         seen: set[str] = set()
         dupes: list[str] = []
@@ -395,8 +395,16 @@ def _validate_speakers(speakers: list[SpeakerConfig]) -> None:
     # Per-speaker field validation
     errors = []
     for s in speakers:
+        if not s.name.strip() or not slugify_name(s.name):
+            errors.append("Speaker name must contain at least one letter or number")
+        if s.max_quality not in (AUTO_QUALITY, 5, 6, 7, 27):
+            errors.append(f"Speaker '{s.name}': invalid max_quality {s.max_quality}")
         if s.backend_type == "dlna" and not s.dlna_ip and not s.dlna_udn:
             errors.append(f"Speaker '{s.name}': DLNA IP address is required")
+        if s.backend_type == "dlna" and not validate_port(s.dlna_port):
+            errors.append(f"Speaker '{s.name}': invalid DLNA port {s.dlna_port}")
+        if s.backend_type == "local" and s.audio_buffer_size <= 0:
+            errors.append(f"Speaker '{s.name}': audio buffer size must be positive")
         if s.backend_type not in ("dlna", "local", "stub"):
             errors.append(f"Speaker '{s.name}': unknown backend type '{s.backend_type}'")
         if s.http_port and not validate_port(s.http_port):

@@ -5,12 +5,13 @@ Provides factory methods to instantiate backends by type name.
 """
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from qobuz_proxy.config import Config
 
 from .base import AudioBackend
 from .dlna import DLNABackend
+from .dlna.client import RendererLocation
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +58,11 @@ class BackendFactory:
     """
 
     @classmethod
-    async def create_from_config(cls, config: Config) -> AudioBackend:
+    async def create_from_config(
+        cls,
+        config: Config,
+        on_dlna_location_changed: Optional[Callable[[RendererLocation], None]] = None,
+    ) -> AudioBackend:
         """Create a backend based on configuration."""
         backend_type = config.backend.type
 
@@ -72,7 +77,7 @@ class BackendFactory:
         # Dispatch to type-specific factory method
         if backend_type == "dlna":
             description_url = config.backend.dlna.description_url or None
-            if not description_url:
+            if not description_url and not config.backend.dlna.udn:
                 description_url = await cls._discover_description_url(
                     config.backend.dlna.ip, config.backend.dlna.port or 1400
                 )
@@ -80,6 +85,8 @@ class BackendFactory:
                 ip=config.backend.dlna.ip,
                 port=config.backend.dlna.port or 1400,
                 description_url=description_url,
+                udn=config.backend.dlna.udn,
+                on_location_changed=on_dlna_location_changed,
             )
         elif backend_type == "local":
             return await cls.create_local(
@@ -98,6 +105,8 @@ class BackendFactory:
         fixed_volume: bool = False,
         name: Optional[str] = None,
         description_url: Optional[str] = None,
+        udn: str = "",
+        on_location_changed: Optional[Callable[[RendererLocation], None]] = None,
     ) -> AudioBackend:
         """
         Create a DLNA backend.
@@ -121,6 +130,8 @@ class BackendFactory:
             fixed_volume=fixed_volume,
             name=name,
             description_url=description_url,
+            udn=udn,
+            on_location_changed=on_location_changed,
         )
         if await backend.connect():
             return backend

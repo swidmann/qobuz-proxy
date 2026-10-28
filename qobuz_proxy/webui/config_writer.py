@@ -6,7 +6,7 @@ from pathlib import Path
 
 import yaml
 
-from qobuz_proxy.config import Config, speaker_config_to_dict
+from qobuz_proxy.config import Config, SpeakerConfig, speaker_config_to_dict
 
 
 def config_to_dict(config: Config) -> dict:
@@ -53,6 +53,47 @@ def persist_speaker_uuids(config: Config, path: Path) -> None:
             changed = True
     if changed:
         _write_yaml(data, path)
+
+
+def persist_speaker_location(
+    config: Config, path: Path, speaker: SpeakerConfig, previous: dict
+) -> bool:
+    """Update one verified endpoint without rewriting other settings or external edits."""
+    if not path.exists():
+        return False
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+    keys = {key: key for key in previous}
+    if isinstance(data.get("speakers"), list):
+        matches = [s for s in data["speakers"] if s.get("uuid") == speaker.uuid]
+        if len(matches) != 1:
+            return False
+        target = matches[0]
+        if target.get("backend", "dlna") != "dlna":
+            return False
+    elif len(config.speakers) == 1:
+        # Keep flat YAML flat, and do not turn environment-only settings into YAML.
+        backend = data.get("backend", {})
+        if backend.get("type", "dlna") != "dlna":
+            return False
+        target = backend.get("dlna")
+        if not isinstance(target, dict):
+            return False
+        keys = {key: key.removeprefix("dlna_") for key in previous}
+    else:
+        return False
+    current = {
+        key: int(target.get(raw_key, 1400))
+        if key == "dlna_port"
+        else str(target.get(raw_key) or "").strip()
+        for key, raw_key in keys.items()
+    }
+    if current != previous:
+        return False
+    for key, raw_key in keys.items():
+        target[raw_key] = getattr(speaker, key)
+    _write_yaml(data, path)
+    return True
 
 
 def _write_yaml(data: dict, path: Path) -> None:

@@ -9,7 +9,8 @@ import logging
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 from aiohttp import ClientTimeout
@@ -29,6 +30,24 @@ UPNP_CONNECTION_MANAGER = "urn:schemas-upnp-org:service:ConnectionManager:1"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2.0
 REQUEST_TIMEOUT_SECONDS = 10.0
+IDENTITY_RETRY_SECONDS = 10.0
+
+
+@dataclass(frozen=True)
+class RendererLocation:
+    """Verified identity and current control endpoint of a renderer."""
+
+    ip: str
+    port: int
+    description_url: str
+    udn: str
+
+
+def _normalized_udn(udn: str) -> str:
+    value = udn.strip().lower().removeprefix("uuid:")
+    if value.startswith("rincon_"):
+        value = value.removesuffix("_mr").removesuffix("_ms")
+    return value
 
 
 @dataclass
@@ -78,7 +97,14 @@ class DLNAClient:
     - Retry logic for transient failures
     """
 
-    def __init__(self, ip: str, port: int = 1400, description_url: Optional[str] = None):
+    def __init__(
+        self,
+        ip: str,
+        port: int = 1400,
+        description_url: Optional[str] = None,
+        udn: str = "",
+        on_location_changed: Optional[Callable[[RendererLocation], None]] = None,
+    ):
         """
         Initialize DLNA client.
 
@@ -86,10 +112,18 @@ class DLNAClient:
             ip: Device IP address
             port: Device port (default 1400 for Sonos)
             description_url: Full URL to UPnP device description XML (from SSDP LOCATION)
+            udn: Expected stable UPnP identity, learned on first connection if empty
+            on_location_changed: Callback for a verified identity or address change
         """
         self.ip = ip
         self.port = port
         self.description_url = description_url
+        self.udn = udn
+        self._on_location_changed = on_location_changed
+        self._reported_location: Optional[RendererLocation] = None
+        self._description_location: Optional[str] = None
+        self._identity_lock = asyncio.Lock()
+        self._identity_retry_at = 0.0
         self.device_info: Optional[DLNADeviceInfo] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._last_volume_time_ms: float = 0
@@ -110,11 +144,9 @@ class DLNAClient:
         self._session = self._build_session()
 
         try:
-            # Try to fetch device description
-            self.device_info = await self._fetch_device_description()
-            if not self.device_info.av_transport_url:
+            if not await self.ensure_device_identity(initial=True):
                 raise DLNAClientError(
-                    f"Device at {self.ip}:{self.port} does not support AVTransport"
+                    f"Could not find configured renderer at {self.ip}:{self.port}"
                 )
         except BaseException:
             session, self._session = self._session, None
@@ -124,8 +156,90 @@ class DLNAClient:
                 pass
             raise
 
+        assert self.device_info is not None
         logger.info(f"Connected to DLNA device: {self.device_info.friendly_name}")
         return self.device_info
+
+    def _verify_identity(self, info: DLNADeviceInfo) -> None:
+        if not info.av_transport_url:
+            raise DLNAClientError("Device does not support AVTransport")
+        if self.udn and _normalized_udn(info.udn) != _normalized_udn(self.udn):
+            raise DLNAClientError("The address now belongs to a different renderer")
+
+    def _accept_identity(self, info: DLNADeviceInfo) -> None:
+        self.device_info = info
+        if isinstance(info.udn, str) and info.udn:
+            self.udn = info.udn
+        location_url = self._description_location or self.description_url or ""
+        if location_url:
+            parsed = urlparse(location_url)
+            self.ip = parsed.hostname or self.ip
+            self.port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            self.description_url = location_url
+        location = RendererLocation(self.ip, self.port, location_url, self.udn)
+        if location != self._reported_location:
+            try:
+                if self._on_location_changed:
+                    self._on_location_changed(location)
+                self._reported_location = location
+            except Exception as e:
+                logger.warning(f"Could not persist renderer location: {e}")
+
+    async def ensure_device_identity(self, *, initial: bool = False) -> bool:
+        """Verify the endpoint before controls; rediscover the same UDN if it moved."""
+        if not initial and not self.udn:
+            return True  # Legacy renderers without a UDN can only be addressed by IP.
+        async with self._identity_lock:
+            if self._session is None or time.monotonic() < self._identity_retry_at:
+                return False
+            try:
+                info = await self._fetch_device_description()
+                self._verify_identity(info)
+            except (DLNAClientError, aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+                logger.debug(f"Renderer identity check failed at {self.ip}: {e}")
+                if not self.udn:
+                    return False
+                rediscovered = await self._rediscover_identity()
+                if rediscovered is None:
+                    self._identity_retry_at = time.monotonic() + IDENTITY_RETRY_SECONDS
+                    return False
+                info = rediscovered
+            self._identity_retry_at = 0.0
+            self._accept_identity(info)
+            return True
+
+    async def _rediscover_identity(self) -> Optional[DLNADeviceInfo]:
+        from .discovery import DLNADiscovery
+
+        try:
+            devices = await DLNADiscovery().discover(timeout=3.0)
+            matches = {
+                (d.ip, d.port, d.location): d
+                for d in devices
+                if d.udn and _normalized_udn(d.udn) == _normalized_udn(self.udn)
+            }
+        except Exception as e:
+            logger.warning(f"Renderer rediscovery failed: {e}")
+            return None
+        if len(matches) != 1:
+            logger.debug(f"Expected one renderer with UDN {self.udn}, found {len(matches)}")
+            return None
+        device = next(iter(matches.values()))
+        previous = self.ip, self.port, self.description_url, self._description_location
+        self.ip, self.port, self.description_url = device.ip, device.port, device.location or None
+        self._description_location = None
+        try:
+            info = await self._fetch_device_description()
+            self._verify_identity(info)  # Verify the XML too, not just the SSDP advertisement.
+        except asyncio.CancelledError:
+            self.ip, self.port, self.description_url, self._description_location = previous
+            raise
+        except (DLNAClientError, aiohttp.ClientError, OSError, asyncio.TimeoutError) as e:
+            self.ip, self.port, self.description_url, self._description_location = previous
+            logger.warning(f"Could not verify rediscovered renderer: {e}")
+            return None
+        logger.info(f"Found renderer {self.udn} at {self.ip}:{self.port}")
+        return info
 
     @staticmethod
     def _build_session() -> aiohttp.ClientSession:
@@ -653,8 +767,8 @@ class DLNAClient:
         if not self._session:
             raise DLNAClientError("Session not initialized")
 
-        from urllib.parse import urlparse
-
+        if not self.ip and not self.description_url:
+            raise DLNAClientError("No renderer address hint")
         xml_text = None
         base_url = None
 
@@ -664,6 +778,7 @@ class DLNAClient:
                 async with self._session.get(self.description_url) as response:
                     if response.status == 200:
                         xml_text = await response.text()
+                        self._description_location = self.description_url
                         parsed = urlparse(self.description_url)
                         base_url = f"{parsed.scheme}://{parsed.hostname}:{parsed.port or 80}"
                         logger.debug(f"Found device description at {self.description_url}")
@@ -671,7 +786,7 @@ class DLNAClient:
                 logger.debug(f"SSDP location {self.description_url} failed: {e}")
 
         # 2. Fall back to well-known paths
-        if not xml_text:
+        if not xml_text and not (self.udn and self.description_url):
             paths = [
                 "/xml/device_description.xml",  # Sonos
                 "/description.xml",
@@ -680,6 +795,8 @@ class DLNAClient:
                 "/dmr/SamsungMRDesc.xml",  # Samsung
                 "/rootDesc.xml",
             ]
+            if self.udn:
+                paths = paths[:1]  # Rediscover by identity instead of probing six stale URLs.
 
             for path in paths:
                 url = f"http://{self.ip}:{self.port}{path}"
@@ -687,6 +804,7 @@ class DLNAClient:
                     async with self._session.get(url) as response:
                         if response.status == 200:
                             xml_text = await response.text()
+                            self._description_location = url
                             base_url = f"http://{self.ip}:{self.port}"
                             logger.debug(f"Found device description at {url}")
                             break
@@ -716,7 +834,7 @@ class DLNAClient:
                     info.manufacturer = elem.text or ""
                 elif tag == "modelName":
                     info.model_name = elem.text or ""
-                elif tag == "UDN":
+                elif tag == "UDN" and not info.udn:
                     info.udn = elem.text or ""
 
             # Find service URLs
@@ -822,6 +940,16 @@ class DLNAClient:
         last_error_code: Optional[int] = None
         last_error_desc: Optional[str] = None
         for attempt in range(retries):
+            if not await self.ensure_device_identity():
+                return SoapResult(success=False)
+            if self.udn and self.device_info:
+                url = {
+                    UPNP_AV_TRANSPORT: self.device_info.av_transport_url,
+                    UPNP_RENDERING_CONTROL: self.device_info.rendering_control_url,
+                    UPNP_CONNECTION_MANAGER: self.device_info.connection_manager_url,
+                }.get(service, url)
+                if not url:
+                    return SoapResult(success=False)
             try:
                 async with self._session.post(url, data=envelope, headers=headers) as response:
                     if response.status == 200:

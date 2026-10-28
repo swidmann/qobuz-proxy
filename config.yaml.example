@@ -20,7 +20,8 @@ device:
 backend:
   type: "dlna"                  # dlna or local
   dlna:
-    ip: "192.168.1.50"          # Required: DLNA device IP
+    ip: "192.168.1.50"          # Address hint; optional when udn is provided
+    # udn: "uuid:renderer-id"   # Stable UPnP identity, learned on first connection
     port: 1400                  # DLNA device port
     fixed_volume: false         # Ignore volume commands
     proxy_port: 7120            # Audio proxy port for DLNA streaming
@@ -53,6 +54,7 @@ logging:
 #   - name: "Living Room"
 #     backend: dlna
 #     dlna_ip: "192.168.1.50"
+#     dlna_udn: "uuid:renderer-id"  # Learned automatically when saved to YAML
 #     max_quality: auto
 #     # http_port: 8689          # optional, auto-assigned
 #     # proxy_port: 7120         # optional, auto-assigned

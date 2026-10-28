@@ -35,7 +35,11 @@ from qobuz_proxy.config import (
     slugify_name,
 )
 from qobuz_proxy.speaker import Speaker
-from qobuz_proxy.webui.config_writer import persist_speaker_uuids, save_config
+from qobuz_proxy.webui.config_writer import (
+    persist_speaker_location,
+    persist_speaker_uuids,
+    save_config,
+)
 from qobuz_proxy.webui.routes import register_routes
 
 logger = logging.getLogger(__name__)
@@ -51,6 +55,7 @@ def _configured_speaker_status(sc: SpeakerConfig, status: str) -> dict:
         config_dict["dlna_ip"] = sc.dlna_ip
         config_dict["dlna_port"] = sc.dlna_port
         config_dict["description_url"] = sc.dlna_description_url
+        config_dict["dlna_udn"] = sc.dlna_udn
         config_dict["fixed_volume"] = sc.dlna_fixed_volume
     elif sc.backend_type == "local":
         config_dict["audio_device"] = sc.audio_device
@@ -434,6 +439,7 @@ class QobuzProxy:
             dlna_port=int(body.get("dlna_port", 1400)),
             dlna_fixed_volume=bool(body.get("fixed_volume", False)),
             dlna_description_url=body.get("description_url", ""),
+            dlna_udn=str(body.get("dlna_udn") or "").strip(),
             audio_device=body.get("audio_device", "default"),
             audio_buffer_size=int(body.get("buffer_size", 2048)),
         )
@@ -450,7 +456,7 @@ class QobuzProxy:
         self._config.speakers.append(sc)
         self._save_config()
 
-        speaker = Speaker(config=sc, api_client=self._api_client, app_id=self._app_id)
+        speaker = self._make_speaker(sc)
         started = await speaker.start()
         if started:
             self._speakers.append(speaker)
@@ -511,6 +517,7 @@ class QobuzProxy:
             dlna_port=int(body.get("dlna_port", old_config.dlna_port)),
             dlna_fixed_volume=bool(body.get("fixed_volume", old_config.dlna_fixed_volume)),
             dlna_description_url=body.get("description_url", old_config.dlna_description_url),
+            dlna_udn=str(body.get("dlna_udn", old_config.dlna_udn) or "").strip(),
             proxy_port=old_config.proxy_port,
             audio_device=body.get("audio_device", old_config.audio_device),
             audio_buffer_size=int(body.get("buffer_size", old_config.audio_buffer_size)),
@@ -527,7 +534,7 @@ class QobuzProxy:
             await self._speakers[speaker_idx].stop()
 
         assert self._api_client is not None
-        new_speaker = Speaker(config=new_config, api_client=self._api_client, app_id=self._app_id)
+        new_speaker = self._make_speaker(new_config)
         started = await new_speaker.start()
         if speaker_idx is not None:
             self._speakers[speaker_idx] = new_speaker
@@ -650,6 +657,24 @@ class QobuzProxy:
     # Speaker lifecycle
     # ------------------------------------------------------------------
 
+    def _make_speaker(self, config: SpeakerConfig) -> Speaker:
+        assert self._api_client is not None
+        return Speaker(
+            config=config,
+            api_client=self._api_client,
+            app_id=self._app_id,
+            on_config_changed=self._on_speaker_config_changed,
+        )
+
+    def _on_speaker_config_changed(self, speaker: SpeakerConfig, previous: dict) -> None:
+        if not any(sc is speaker for sc in self._config.speakers):
+            return  # An edit or removal superseded the in-flight discovery.
+        path = self._config.config_path
+        if path is not None and not persist_speaker_location(self._config, path, speaker, previous):
+            logger.warning(
+                f"Renderer location for '{speaker.name}' was not saved: config changed or is environment-only"
+            )
+
     async def _start_speakers(self) -> None:
         """Create and start Speaker instances from config.
 
@@ -667,14 +692,7 @@ class QobuzProxy:
         running_ids = {slugify_name(s.name) for s in self._speakers}
         configs = [sc for sc in self._config.speakers if slugify_name(sc.name) not in running_ids]
 
-        speakers = [
-            Speaker(
-                config=sc,
-                api_client=self._api_client,
-                app_id=self._app_id,
-            )
-            for sc in configs
-        ]
+        speakers = [self._make_speaker(sc) for sc in configs]
 
         tasks = [asyncio.ensure_future(s.start()) for s in speakers]
         try:
@@ -746,7 +764,7 @@ class QobuzProxy:
                 if self._api_client is None:
                     return  # Logged out — speakers restart on the next login
 
-                speaker = Speaker(config=config, api_client=self._api_client, app_id=self._app_id)
+                speaker = self._make_speaker(config)
                 try:
                     started = await speaker.start()
                 except asyncio.CancelledError:

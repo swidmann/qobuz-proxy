@@ -19,7 +19,7 @@ from qobuz_proxy.backends.types import (
     BufferStatus,
     PlaybackState,
 )
-from .client import DLNAClient, DLNAClientError, SoapResult
+from .client import DLNAClient, DLNAClientError, RendererLocation, SoapResult
 from .capabilities import (
     DLNACapabilities,
     CapabilityCache,
@@ -93,6 +93,8 @@ class DLNABackend(AudioBackend):
         fixed_volume: bool = False,
         name: Optional[str] = None,
         description_url: Optional[str] = None,
+        udn: str = "",
+        on_location_changed: Optional[Callable[[RendererLocation], None]] = None,
     ):
         """
         Initialize DLNA backend.
@@ -103,12 +105,16 @@ class DLNABackend(AudioBackend):
             fixed_volume: If True, ignore volume commands
             name: Display name (auto-detected if not provided)
             description_url: Full URL to UPnP device description XML
+            udn: Expected stable UPnP identity
+            on_location_changed: Callback for a verified identity or address change
         """
         super().__init__(name or f"DLNA ({ip})")
         self._ip = ip
         self._port = port
         self._fixed_volume = fixed_volume
         self._description_url = description_url
+        self._udn = udn
+        self._on_location_changed = on_location_changed
 
         self._client: Optional[DLNAClient] = None
         self._poll_task: Optional[asyncio.Task] = None
@@ -290,7 +296,13 @@ class DLNABackend(AudioBackend):
     async def connect(self) -> bool:
         """Connect to DLNA device."""
         try:
-            self._client = DLNAClient(self._ip, self._port, description_url=self._description_url)
+            self._client = DLNAClient(
+                self._ip,
+                self._port,
+                description_url=self._description_url,
+                udn=self._udn,
+                on_location_changed=self._update_location,
+            )
             device_info = await self._client.connect()
 
             # Update name from device
@@ -319,6 +331,12 @@ class DLNABackend(AudioBackend):
         except Exception as e:
             logger.error(f"Unexpected error connecting to DLNA: {e}", exc_info=True)
             return False
+
+    def _update_location(self, location: RendererLocation) -> None:
+        self._ip, self._port = location.ip, location.port
+        self._description_url, self._udn = location.description_url, location.udn
+        if self._on_location_changed:
+            self._on_location_changed(location)
 
     async def _discover_capabilities(self, device_info) -> None:
         """Query and parse device capabilities."""
@@ -780,6 +798,9 @@ class DLNABackend(AudioBackend):
 
                 if not self._is_connected:
                     break
+
+                if self._client and not await self._client.ensure_device_identity():
+                    continue
 
                 # Spotify/AirPlay/other controllers own their transport and queue.
                 # Their state changes must never trigger Qobuz auto-advance.

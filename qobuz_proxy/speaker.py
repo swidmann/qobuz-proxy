@@ -8,7 +8,7 @@ run concurrently, one per physical audio device.
 
 import asyncio
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from aiohttp import web
 
@@ -40,6 +40,7 @@ from qobuz_proxy.backends import AudioBackend, BackendFactory, PlaybackState
 from qobuz_proxy.playback.play_reporter import PlayReporter
 from qobuz_proxy.playback.state_reporter import PlaybackStateReport, wire_playing_state
 from qobuz_proxy.backends.dlna import AudioProxyServer, DLNABackend, MetadataServiceURLProvider
+from qobuz_proxy.backends.dlna.client import RendererLocation
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,7 @@ class Speaker:
         api_client: QobuzAPIClient,
         app_id: str,
         web_app: Optional[web.Application] = None,
+        on_config_changed: Optional[Callable[[SpeakerConfig, dict], None]] = None,
     ) -> None:
         """
         Initialize Speaker.
@@ -68,11 +70,13 @@ class Speaker:
             api_client: Authenticated Qobuz API client (shared across speakers)
             app_id: Qobuz application ID (shared across speakers)
             web_app: Optional shared aiohttp Application for discovery routes
+            on_config_changed: Callback to persist learned renderer identity and address
         """
         self._config = config
         self._api_client = api_client
         self._app_id = app_id
         self._web_app = web_app
+        self._on_config_changed = on_config_changed
 
         self._is_running: bool = False
         self._ws_connected_event: asyncio.Event = asyncio.Event()
@@ -156,6 +160,7 @@ class Speaker:
             config_dict["dlna_ip"] = self._config.dlna_ip
             config_dict["dlna_port"] = self._config.dlna_port
             config_dict["description_url"] = self._config.dlna_description_url
+            config_dict["dlna_udn"] = self._config.dlna_udn
             config_dict["fixed_volume"] = self._config.dlna_fixed_volume
         elif self._config.backend_type == "local":
             config_dict["audio_device"] = self._config.audio_device
@@ -196,6 +201,7 @@ class Speaker:
                     fixed_volume=self._config.dlna_fixed_volume,
                     proxy_port=self._config.proxy_port,
                     description_url=self._config.dlna_description_url,
+                    udn=self._config.dlna_udn,
                 ),
                 local=LocalConfig(
                     device=self._config.audio_device,
@@ -209,6 +215,33 @@ class Speaker:
             logging=LoggingConfig(),
         )
         return cfg
+
+    def _on_dlna_location_changed(self, location: RendererLocation) -> None:
+        if not location.udn:
+            return
+        previous = {
+            "dlna_ip": self._config.dlna_ip,
+            "dlna_port": self._config.dlna_port,
+            "dlna_description_url": self._config.dlna_description_url,
+            "dlna_udn": self._config.dlna_udn,
+        }
+        updated = {
+            "dlna_ip": location.ip,
+            "dlna_port": location.port,
+            "dlna_description_url": location.description_url,
+            "dlna_udn": location.udn,
+        }
+        if updated == previous:
+            return
+        for key, value in updated.items():
+            setattr(self._config, key, value)
+        try:
+            if self._on_config_changed:
+                self._on_config_changed(self._config, previous)
+        except BaseException:
+            for key, value in previous.items():
+                setattr(self._config, key, value)
+            raise
 
     async def start(self) -> bool:
         """
@@ -225,7 +258,9 @@ class Speaker:
 
             # 2. Create audio backend
             logger.debug(f"[{self.name}] Creating audio backend...")
-            backend = await BackendFactory.create_from_config(component_config)
+            backend = await BackendFactory.create_from_config(
+                component_config, on_dlna_location_changed=self._on_dlna_location_changed
+            )
             self._backend = backend
             logger.info(f"[{self.name}] Connected to backend: {backend.name}")
 

@@ -69,6 +69,7 @@ ENV_MAPPINGS = {
     "QOBUZPROXY_DEVICE_TYPE": ("device", "device_type"),
     # DLNA
     "QOBUZPROXY_DLNA_IP": ("backend", "dlna", "ip"),
+    "QOBUZPROXY_DLNA_UDN": ("backend", "dlna", "udn"),
     "QOBUZPROXY_DLNA_PORT": ("backend", "dlna", "port"),
     "QOBUZPROXY_DLNA_FIXED_VOLUME": ("backend", "dlna", "fixed_volume"),
     # Backend type
@@ -122,6 +123,7 @@ class DLNAConfig:
     fixed_volume: bool = False
     proxy_port: int = 7120
     description_url: str = ""  # Full URL to UPnP device description XML (auto-discovered via SSDP)
+    udn: str = ""  # Stable UPnP identity; network addresses are hints.
 
 
 @dataclass
@@ -171,6 +173,7 @@ class SpeakerConfig:
     dlna_port: int = 1400
     dlna_fixed_volume: bool = False
     dlna_description_url: str = ""
+    dlna_udn: str = ""
     proxy_port: int = 0  # 0 = auto-assign
     audio_device: str = "default"
     audio_buffer_size: int = 2048
@@ -221,7 +224,7 @@ def validate_config(config: Config) -> None:
 
     # Backend
     if config.backend.type == "dlna":
-        if not config.backend.dlna.ip:
+        if not config.backend.dlna.ip and not config.backend.dlna.udn:
             errors.append("DLNA IP address is required when backend type is 'dlna'")
         if not validate_port(config.backend.dlna.port):
             errors.append(f"Invalid DLNA port: {config.backend.dlna.port}")
@@ -298,6 +301,8 @@ def speaker_config_to_dict(sc: SpeakerConfig) -> dict:
         d["dlna_fixed_volume"] = sc.dlna_fixed_volume
         if sc.dlna_description_url:
             d["dlna_description_url"] = sc.dlna_description_url
+        if sc.dlna_udn:
+            d["dlna_udn"] = sc.dlna_udn
     elif sc.backend_type == "local":
         d["audio_device"] = sc.audio_device
         d["audio_buffer_size"] = sc.audio_buffer_size
@@ -318,6 +323,7 @@ def _single_speaker_from_config(config: Config) -> SpeakerConfig:
         dlna_port=config.backend.dlna.port,
         dlna_fixed_volume=config.backend.dlna.fixed_volume,
         dlna_description_url=config.backend.dlna.description_url,
+        dlna_udn=config.backend.dlna.udn,
         proxy_port=config.backend.dlna.proxy_port,
         audio_device=config.backend.local.device,
         audio_buffer_size=config.backend.local.buffer_size,
@@ -389,7 +395,7 @@ def _validate_speakers(speakers: list[SpeakerConfig]) -> None:
     # Per-speaker field validation
     errors = []
     for s in speakers:
-        if s.backend_type == "dlna" and not s.dlna_ip:
+        if s.backend_type == "dlna" and not s.dlna_ip and not s.dlna_udn:
             errors.append(f"Speaker '{s.name}': DLNA IP address is required")
         if s.backend_type not in ("dlna", "local", "stub"):
             errors.append(f"Speaker '{s.name}': unknown backend type '{s.backend_type}'")
@@ -424,6 +430,7 @@ def _parse_yaml_speakers(raw_speakers: list[dict], config: Config) -> list[Speak
             dlna_port=int(raw.get("dlna_port", 1400)),
             dlna_fixed_volume=bool(raw.get("dlna_fixed_volume", False)),
             dlna_description_url=raw.get("dlna_description_url", ""),
+            dlna_udn=str(raw.get("dlna_udn") or "").strip(),
             proxy_port=int(raw.get("proxy_port", 0)),
             audio_device=raw.get("audio_device", "default"),
             audio_buffer_size=int(raw.get("audio_buffer_size", 2048)),
@@ -468,6 +475,7 @@ def _parse_env_speakers(config: Config) -> list[SpeakerConfig]:
     backend_types = _split_env_padded("QOBUZPROXY_BACKEND", count, "dlna")
     device_types = _split_env_padded("QOBUZPROXY_DEVICE_TYPE", count, DEFAULT_DEVICE_TYPE)
     dlna_ips = _split_env_padded("QOBUZPROXY_DLNA_IP", count, "")
+    dlna_udns = _split_env_padded("QOBUZPROXY_DLNA_UDN", count, "")
     dlna_ports_raw = _split_env_padded("QOBUZPROXY_DLNA_PORT", count, "1400")
     dlna_fixed_volumes_raw = _split_env_padded("QOBUZPROXY_DLNA_FIXED_VOLUME", count, "false")
     http_ports_raw = _split_env_padded("QOBUZPROXY_HTTP_PORT", count, "0")
@@ -486,6 +494,7 @@ def _parse_env_speakers(config: Config) -> list[SpeakerConfig]:
             http_port=int(http_ports_raw[i]),
             bind_address=config.server.bind_address,
             dlna_ip=dlna_ips[i],
+            dlna_udn=dlna_udns[i],
             dlna_port=int(dlna_ports_raw[i]),
             dlna_fixed_volume=dlna_fixed_volumes_raw[i].lower() in ("true", "1", "yes", "on"),
             proxy_port=int(proxy_ports_raw[i]),
@@ -516,7 +525,9 @@ def build_speaker_configs(
             speakers = env_speakers
         else:
             # Only create a speaker from flat config if a backend is actually configured
-            has_backend = config.backend.dlna.ip or config.backend.type == "local"
+            has_backend = (
+                config.backend.dlna.ip or config.backend.dlna.udn or config.backend.type == "local"
+            )
             if has_backend:
                 speakers = [_single_speaker_from_config(config)]
 
@@ -681,6 +692,7 @@ def dict_to_config(d: dict) -> Config:
             config.backend.dlna.description_url = dlna.get(
                 "description_url", config.backend.dlna.description_url
             )
+            config.backend.dlna.udn = str(dlna.get("udn") or "").strip()
         if "local" in b:
             local = b["local"]
             config.backend.local.device = local.get("device", config.backend.local.device)

@@ -671,6 +671,7 @@
                 return;
             }
             payload.dlna_ip = ip;
+            payload.dlna_udn = selectedDevice ? (selectedDevice.udn || "") : "";
             payload.dlna_port = parseInt(document.getElementById("new-dlna-port").value) || 1400;
             var urlEl = document.getElementById("new-dlna-url");
             payload.description_url = urlEl ? urlEl.value.trim() : "";

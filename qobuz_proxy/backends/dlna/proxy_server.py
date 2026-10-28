@@ -48,6 +48,7 @@ class RegisteredTrack:
     qobuz_url: str
     content_type: str
     url_fetched_at: float = field(default_factory=time.time)
+    last_accessed: float = field(default_factory=time.monotonic)
 
     def is_url_expired(self, max_age: float = DEFAULT_URL_MAX_AGE_SECONDS) -> bool:
         """Check if the URL has expired or is about to expire."""
@@ -102,6 +103,7 @@ class AudioProxyServer:
         self._url_max_age = url_max_age
 
         self._tracks: Dict[str, RegisteredTrack] = {}
+        self._retained_keys: Callable[[], set[str]] = set
         self._on_delivery_failure: Optional[Callable[[str, bool], None]] = None
         self._app: Optional[web.Application] = None
         self._runner: Optional[web.AppRunner] = None
@@ -173,12 +175,14 @@ class AudioProxyServer:
             Local proxy URL for the track
         """
         key = proxy_key or track_id
+        self._tracks.pop(key, None)
         self._tracks[key] = RegisteredTrack(
             track_id=track_id,
             qobuz_url=qobuz_url,
             content_type=content_type,
             url_fetched_at=time.time(),
         )
+        self._prune_tracks(keep=key)
 
         # Determine extension from content type
         ext = "flac" if "flac" in content_type else "mp3"
@@ -186,6 +190,22 @@ class AudioProxyServer:
 
         logger.debug(f"Registered track {track_id} (key={key}) -> {proxy_url}")
         return proxy_url
+
+    def set_retained_keys_provider(self, provider: Callable[[], set[str]]) -> None:
+        """Protect the playing and prefetched URLs from registry eviction."""
+        self._retained_keys = provider
+
+    def _prune_tracks(self, keep: str) -> None:
+        retained = self._retained_keys() | {keep}
+        now = time.monotonic()
+        for key, track in list(self._tracks.items()):
+            if key not in retained and now - track.last_accessed > 3600:
+                del self._tracks[key]
+        for key in list(self._tracks):
+            if len(self._tracks) <= 128:
+                break
+            if key not in retained:
+                del self._tracks[key]
 
     def set_delivery_failure_callback(self, callback: Callable[[str, bool], None]) -> None:
         """Register ``callback(proxy_key, before_audio)`` for streams we could not serve.
@@ -230,6 +250,10 @@ class AudioProxyServer:
         if not track:
             logger.warning(f"Unknown track requested: {proxy_key}")
             return web.Response(status=404, text="Track not found")
+        track.last_accessed = time.monotonic()
+        # Insertion order is the least-recently-used order, including seeks.
+        self._tracks.pop(proxy_key)
+        self._tracks[proxy_key] = track
 
         # Check if URL needs refresh. force=True bypasses the metadata cache:
         # its TTL is longer than the proxy's max age, so a plain fetch inside

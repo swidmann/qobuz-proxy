@@ -285,6 +285,13 @@ class DLNABackend(AudioBackend):
         """
         self._proxy_server = proxy
         proxy.set_delivery_failure_callback(self._on_delivery_failure)
+        proxy.set_retained_keys_provider(
+            lambda: {
+                _proxy_key(url)
+                for url in (self._current_proxy_url, self._next_track_proxy_url)
+                if url
+            }
+        )
         logger.info("Audio proxy server configured for DLNA backend")
 
     def _on_delivery_failure(self, proxy_key: str, before_audio: bool) -> None:

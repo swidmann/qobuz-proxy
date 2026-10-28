@@ -10,7 +10,13 @@ permissions:
   packages: write
 
 jobs:
+  validate:
+    uses: ./.github/workflows/validate.yml
+    permissions:
+      contents: read
+
   docker:
+    needs: validate
     name: Docker image
     runs-on: ubuntu-latest
     steps:
@@ -38,6 +44,7 @@ jobs:
             ghcr.io/${{ github.repository_owner }}/qobuz-proxy:${{ github.ref_name }}
 
   github-release:
+    needs: validate
     name: GitHub Release
     runs-on: ubuntu-latest
     steps:

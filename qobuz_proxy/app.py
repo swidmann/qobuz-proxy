@@ -631,10 +631,7 @@ class QobuzProxy:
             self._config.server.http_port,
         )
         await self._web_site.start()
-        logger.info(
-            f"Web server listening on "
-            f"127.0.0.1:{self._config.server.http_port}"
-        )
+        logger.info(f"Web server listening on 127.0.0.1:{self._config.server.http_port}")
 
     async def _stop_web_server(self) -> None:
         """Shut down the shared aiohttp app."""

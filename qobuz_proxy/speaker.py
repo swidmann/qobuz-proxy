@@ -445,10 +445,13 @@ class Speaker:
         """Return current effective quality (may change after auto-detection or app request)."""
         return self._effective_quality
 
-    def _on_app_connected(self, tokens: ConnectTokens) -> None:
+    def _on_app_connected(self, tokens: ConnectTokens) -> bool:
         """Callback invoked by DiscoveryService when the Qobuz app provides tokens."""
+        if self._ws_manager and not self._ws_manager.accepts_session(tokens.session_id):
+            return False
         logger.info(f"[{self.name}] Qobuz app connected, setting up WebSocket...")
         asyncio.create_task(self._setup_websocket(tokens))
+        return True
 
     async def _on_external_playback(self) -> None:
         """Release cloud ownership before ending the old Qobuz listening session."""
@@ -469,14 +472,13 @@ class Speaker:
                 if isinstance(self._backend, DLNABackend):
                     await self._backend.check_external_playback()
                     self._backend.prepare_for_selection()
-                if self._discovery:
-                    # The source check above may have just released the old
-                    # session. This request is a new, explicit selection.
-                    self._discovery.set_session(tokens)
                 if self._ws_manager is not None:
                     # A discovery connect is an explicit selection, even when
                     # the same speaker already has an idle WebSocket.
-                    self._ws_manager.set_tokens(tokens, activate=True)
+                    if self._ws_manager.set_tokens(tokens, activate=True) is False:
+                        return
+                    if self._discovery:
+                        self._discovery.set_session(tokens)
                     await self._ws_manager.start()
                     logger.info(f"[{self.name}] Refreshed WebSocket tokens from Qobuz app")
                     self._ws_connected_event.set()
@@ -490,6 +492,9 @@ class Speaker:
                 self._ws_manager.set_tokens(tokens, activate=True)
                 self._ws_manager.set_token_refresher(self._api_client.get_ws_token)
                 self._ws_manager.set_max_audio_quality(self._effective_quality)
+                if self._discovery:
+                    self._ws_manager.on_session_rejected(self._discovery.clear_session)
+                    self._discovery.set_session(tokens)
 
                 # Create handlers
                 self._queue_handler = QueueHandler(self._queue)

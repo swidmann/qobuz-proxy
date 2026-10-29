@@ -38,6 +38,7 @@ TOKEN_REFRESH_IDLE_PERIOD = (
 INITIAL_RECONNECT_DELAY = 1.0  # seconds
 MAX_RECONNECT_DELAY = 60.0  # seconds
 RECONNECT_BACKOFF_MULTIPLIER = 2.0
+STABLE_CONNECTION_SECONDS = 30.0
 TOKEN_MINT_RETRY_DELAY = 30.0  # seconds between self-mint attempts
 
 # Message handler callback type
@@ -49,6 +50,10 @@ TokenRefresher = Callable[[], Awaitable[Optional[WSToken]]]
 
 class TokenRefreshRequired(Exception):
     """Raised when the WebSocket must wait for refreshed tokens from the app."""
+
+
+class SessionRejected(Exception):
+    """The app must supply a new session; reconnecting cannot repair this one."""
 
 
 class WsManager:
@@ -77,6 +82,8 @@ class WsManager:
         self._ws: Optional[ClientConnection] = None
         self._ws_token: Optional[WSToken] = None
         self._session_uuid: Optional[bytes] = None
+        self._connection_session_uuid: Optional[bytes] = None
+        self._rejected_session_uuid: Optional[bytes] = None
         self._is_connected = False
         self._should_run = False
 
@@ -111,11 +118,16 @@ class WsManager:
         # Callbacks
         self._on_connected: Optional[Callable[[], None]] = None
         self._on_disconnected: Optional[Callable[[], None]] = None
+        self._on_session_rejected: Optional[Callable[[bytes], None]] = None
 
         # Quality setting for join session message
         self._max_audio_quality: int = 27  # Default to Hi-Res 192k
 
-    def set_tokens(self, tokens: ConnectTokens, *, activate: bool = False) -> None:
+    def accepts_session(self, session_id: str) -> bool:
+        """A refreshed JWT must not revive a session explicitly rejected by Qobuz."""
+        return self._uuid_to_bytes(session_id) != self._rejected_session_uuid
+
+    def set_tokens(self, tokens: ConnectTokens, *, activate: bool = False) -> bool:
         """
         Set connection tokens from discovery service.
 
@@ -124,6 +136,8 @@ class WsManager:
             activate: An explicit discovery connect request selected this speaker.
                 Token maintenance alone must not request activation.
         """
+        if not self.accepts_session(tokens.session_id):
+            return False
         previous_token = self._ws_token
         previous_session_uuid = self._session_uuid
         if activate:
@@ -148,6 +162,8 @@ class WsManager:
         tokens_changed = (
             previous_token != self._ws_token or previous_session_uuid != self._session_uuid
         )
+        if tokens_changed or activate:
+            self._reconnect_delay = INITIAL_RECONNECT_DELAY
         reconnect = tokens_changed or (activate and not self._renderer_active)
         if activate and (reconnect or not self._is_connected):
             self._activation_request = object()
@@ -159,6 +175,7 @@ class WsManager:
                 activate,
             )
             asyncio.create_task(self._close_for_token_refresh())
+        return True
 
     def set_token_refresher(self, refresher: TokenRefresher) -> None:
         """
@@ -190,6 +207,10 @@ class WsManager:
         """Register callback for disconnection."""
         self._on_disconnected = callback
 
+    def on_session_rejected(self, callback: Callable[[bytes], None]) -> None:
+        """Clear stale discovery state when the server rejects this session."""
+        self._on_session_rejected = callback
+
     def register_handler(self, message_type: int, handler: MessageHandler) -> None:
         """
         Register a handler for a specific QConnect message type.
@@ -204,6 +225,8 @@ class WsManager:
     async def start(self) -> None:
         """Start WebSocket connection loop."""
         if self._should_run or self._external_playback:
+            return
+        if self._session_uuid is not None and self._session_uuid == self._rejected_session_uuid:
             return
 
         # A source takeover cancels the old connection. Finish its socket
@@ -463,27 +486,35 @@ class WsManager:
     async def _connection_loop(self) -> None:
         """Main connection loop with reconnection logic."""
         while self._should_run:
+            token_version = self._token_version
             should_backoff = True
             try:
                 await self._connect_and_run()
             except TokenRefreshRequired:
                 should_backoff = False
+            except SessionRejected:
+                break
             except Exception as e:
                 logger.error(f"Connection error: {e}")
 
             if not self._should_run:
                 break
 
-            if not should_backoff:
+            if not should_backoff or token_version != self._token_version:
                 continue
 
             # Exponential backoff
             logger.info(f"Reconnecting in {self._reconnect_delay:.1f}s...")
-            await asyncio.sleep(self._reconnect_delay)
-            self._reconnect_delay = min(
-                self._reconnect_delay * RECONNECT_BACKOFF_MULTIPLIER,
-                MAX_RECONNECT_DELAY,
-            )
+            self._token_update_event.clear()
+            if token_version != self._token_version:
+                continue
+            try:
+                await asyncio.wait_for(self._token_update_event.wait(), self._reconnect_delay)
+            except asyncio.TimeoutError:
+                self._reconnect_delay = min(
+                    self._reconnect_delay * RECONNECT_BACKOFF_MULTIPLIER,
+                    MAX_RECONNECT_DELAY,
+                )
 
     async def _connect_and_run(self) -> None:
         """Connect, authenticate, and handle messages."""
@@ -493,6 +524,8 @@ class WsManager:
         assert self._ws_token is not None
         endpoint = self._ws_token.endpoint
         token_version = self._token_version
+        session_uuid = self._session_uuid
+        connected_at: Optional[float] = None
         logger.info("[%s] Connecting to %s...", self.config.device.name, endpoint[:50])
 
         try:
@@ -504,6 +537,7 @@ class WsManager:
                 ping_timeout=PONG_TIMEOUT,
             ) as ws:
                 self._ws = ws
+                self._connection_session_uuid = session_uuid
 
                 # Authenticate
                 if not await self._authenticate():
@@ -523,7 +557,7 @@ class WsManager:
                     raise TokenRefreshRequired()
 
                 self._is_connected = True
-                self._reconnect_delay = INITIAL_RECONNECT_DELAY  # Reset backoff
+                connected_at = time.monotonic()
                 self._last_activity_time = time.monotonic()
                 self._refresh_deferred = False
                 logger.info("[%s] Connected and authenticated", self.config.device.name)
@@ -535,15 +569,21 @@ class WsManager:
                 # Message receive loop
                 await self._receive_loop()
 
-        except TokenRefreshRequired:
+        except (TokenRefreshRequired, SessionRejected):
             raise
         except websockets.ConnectionClosed as e:
             logger.warning(f"Connection closed: {e.code} {e.reason}")
         except Exception as e:
             logger.error(f"Connection failed: {e}")
         finally:
+            if (
+                connected_at is not None
+                and time.monotonic() - connected_at >= STABLE_CONNECTION_SECONDS
+            ):
+                self._reconnect_delay = INITIAL_RECONNECT_DELAY
             self._invalidate_connection()
             self._ws = None
+            self._connection_session_uuid = None
 
     async def _authenticate(self) -> bool:
         """Send AUTHENTICATE message."""
@@ -644,6 +684,29 @@ class WsManager:
         logger.warning("[%s] Token expiring soon, need refresh", self.config.device.name)
         raise TokenRefreshRequired()
 
+    def _check_session_rejection(self, code: object, message: str) -> None:
+        if str(code) != "1001" or "sessionuuid mismatch" not in message.casefold():
+            return
+        if (
+            self._connection_session_uuid is not None
+            and self._connection_session_uuid != self._session_uuid
+        ):
+            raise TokenRefreshRequired()  # A late refusal must not invalidate a new selection.
+        if self._session_uuid is None:
+            return
+        self._rejected_session_uuid = self._session_uuid
+        self._should_run = False
+        self._renderer_active = False
+        self._activation_request = None
+        self._invalidate_connection()
+        if self._on_session_rejected:
+            self._on_session_rejected(self._session_uuid)
+        logger.warning(
+            "[%s] Qobuz rejected the listening session; waiting for a new session from the app",
+            self.config.device.name,
+        )
+        raise SessionRejected()
+
     async def _handle_message(self, data: bytes) -> None:
         """Decode and route incoming message."""
         decoded = self._codec.decode_frame(data)
@@ -653,6 +716,7 @@ class WsManager:
         if decoded.msg_type == MessageType.PAYLOAD:
             await self._handle_payload(decoded)
         elif decoded.msg_type == MessageType.ERROR:
+            self._check_session_rejection(decoded.error_code, decoded.error_message)
             logger.error(f"Server error {decoded.error_code}: {decoded.error_message}")
         elif decoded.msg_type == MessageType.DISCONNECT:
             logger.warning("Server requested disconnect")
@@ -672,6 +736,8 @@ class WsManager:
             if self._external_playback:
                 # Stale cloud activation/snapshots cannot reclaim an external source.
                 continue
+            if msg_type == 1 and msg.HasField("error"):
+                self._check_session_rejection(msg.error.code, msg.error.message)
             if msg_type == QConnectMessageType.SRVR_RNDR_SET_ACTIVE and msg.HasField(
                 "srvrRndrSetActive"
             ):

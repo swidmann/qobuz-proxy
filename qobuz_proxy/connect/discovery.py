@@ -9,6 +9,7 @@ import json
 import logging
 import socket
 import sys
+import uuid
 from typing import Any, Callable, Optional
 
 from aiohttp import web
@@ -74,7 +75,7 @@ class DiscoveryService:
         self,
         config: Config,
         app_id: str,
-        on_connect: Optional[Callable[[ConnectTokens], None]] = None,
+        on_connect: Optional[Callable[[ConnectTokens], Optional[bool]]] = None,
         quality_getter: Optional[QualityGetter] = None,
         web_app: Optional[web.Application] = None,
     ):
@@ -134,8 +135,15 @@ class DiscoveryService:
         self._received_tokens = tokens
         self._current_session_id = tokens.session_id
 
-    def clear_session(self) -> None:
+    def clear_session(self, expected_session_uuid: Optional[bytes] = None) -> None:
         """Require a fresh app handshake after releasing playback ownership."""
+        if expected_session_uuid is not None:
+            try:
+                current = uuid.UUID(self._current_session_id).bytes
+            except ValueError:
+                return
+            if current != expected_session_uuid:
+                return
         self._received_tokens = None
         self._current_session_id = ""
 
@@ -231,14 +239,14 @@ class DiscoveryService:
                 logger.error("Invalid tokens in connect request")
                 return web.json_response({"error": "Invalid tokens"}, status=400)
 
-            # Store tokens
-            self.set_session(tokens)
-
-            logger.info(f"Received connection from app (session: {tokens.session_id[:8]}...)")
-
             # Notify callback
-            if self.on_connect:
-                self.on_connect(tokens)
+            if self.on_connect and self.on_connect(tokens) is False:
+                return web.json_response(
+                    {"error": "Session expired; reconnect from the Qobuz app"}, status=409
+                )
+
+            self.set_session(tokens)
+            logger.info(f"Received connection from app (session: {tokens.session_id[:8]}...)")
 
             return web.json_response({})
 

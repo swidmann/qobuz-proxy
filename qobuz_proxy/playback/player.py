@@ -120,6 +120,9 @@ class QobuzPlayer:
         self._volume: int = 50  # Cached volume level (0-100)
         self._fixed_volume: bool = False  # From config
         self._volume_report_callback: Optional[Callable[[int], asyncio.Future]] = None
+        self._volume_input_lock = asyncio.Lock()
+        self._volume_generation = 0
+        self._volume_commands_in_flight = 0
 
         # File quality report callback - called when track starts playing
         self._file_quality_report_callback: Optional[Callable[[int], asyncio.Future]] = None
@@ -190,6 +193,7 @@ class QobuzPlayer:
         """Stop the player and clean up."""
         self._is_running = False
         self._clear_skip_pending()
+        self.backend.cancel_pending_volume()
 
         # Cancel background tasks
         for task in [self._playback_monitor_task, self._state_update_task]:
@@ -267,22 +271,32 @@ class QobuzPlayer:
         Returns:
             Actual volume level after clamping
         """
-        # Clamp to valid range
-        clamped = max(0, min(100, level))
-
         if self._fixed_volume:
             logger.debug(f"Fixed volume mode: ignoring set_volume({level})")
             return self._volume  # Return current (ignored)
 
-        # Apply to backend
-        await self.backend.set_volume(clamped)
-        self._volume = clamped
+        async with self._volume_input_lock:
+            clamped = max(0, min(100, level))
+            generation = self._remember_volume_request(clamped)
+        return await self._apply_volume_request(clamped, generation)
 
-        # Report change to app
-        await self._report_volume_change()
+    def _remember_volume_request(self, level: int) -> int:
+        self._volume = level
+        self._volume_generation += 1
+        self._volume_commands_in_flight += 1
+        return self._volume_generation
 
-        logger.info(f"Volume set to {clamped}")
-        return clamped
+    async def _apply_volume_request(self, level: int, generation: int) -> int:
+        try:
+            await self.backend.set_volume(level)
+            # An older slow request must not roll the controller back after a
+            # more recent value was already reported.
+            if generation == self._volume_generation:
+                await self._report_volume_change()
+            logger.debug("Volume requested: %s", level)
+            return level
+        finally:
+            self._volume_commands_in_flight -= 1
 
     async def set_volume_delta(self, delta: int) -> int:
         """
@@ -294,9 +308,14 @@ class QobuzPlayer:
         Returns:
             New volume level after adjustment
         """
-        current = await self.get_volume()
-        new_level = current + delta
-        return await self.set_volume(new_level)
+        if self._fixed_volume:
+            return self._volume
+        async with self._volume_input_lock:
+            if not self._volume_commands_in_flight:
+                self._volume = await self.backend.get_volume()
+            clamped = max(0, min(100, self._volume + delta))
+            generation = self._remember_volume_request(clamped)
+        return await self._apply_volume_request(clamped, generation)
 
     async def get_volume(self) -> int:
         """
@@ -308,8 +327,13 @@ class QobuzPlayer:
         if self._fixed_volume:
             return 100  # Fixed volume always reports 100
 
+        if self._volume_commands_in_flight:
+            return self._volume
         # Get from backend (authoritative source)
-        self._volume = await self.backend.get_volume()
+        generation = self._volume_generation
+        actual = await self.backend.get_volume()
+        if generation == self._volume_generation and not self._volume_commands_in_flight:
+            self._volume = actual
         return self._volume
 
     async def _report_volume_change(self) -> None:
@@ -423,9 +447,10 @@ class QobuzPlayer:
         return self._command_generation
 
     def invalidate_pending_commands(self) -> None:
-        """Revoke queued/in-flight playback intents without interrupting current audio."""
+        """Revoke queued remote commands without interrupting current audio."""
         self._next_generation()
         self._clear_skip_pending()
+        self.backend.cancel_pending_volume()
 
     def set_playback_permission_check(self, check: Callable[[], Awaitable[bool]]) -> None:
         """Check renderer ownership before applying a remote session snapshot."""

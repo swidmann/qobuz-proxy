@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 # State polling interval
 STATE_POLL_INTERVAL_SECONDS = 2.0
 
+# Keep network traffic bounded while a volume slider is moving.
+VOLUME_MIN_INTERVAL_SECONDS = 0.2
+
 # Grace period after starting playback to ignore STOPPED state (seconds)
 # This prevents false track-ended events while the device is loading
 PLAYBACK_START_GRACE_PERIOD_SECONDS = 5.0
@@ -118,6 +121,9 @@ class DLNABackend(AudioBackend):
 
         self._client: Optional[DLNAClient] = None
         self._poll_task: Optional[asyncio.Task] = None
+        self._volume_task: Optional[asyncio.Task[None]] = None
+        self._pending_volume: Optional[int] = None
+        self._last_volume_send_at = 0.0
 
         self._current_metadata: Optional[BackendTrackMetadata] = None
         self._position_ms: int = 0
@@ -381,6 +387,10 @@ class DLNABackend(AudioBackend):
     async def disconnect(self) -> None:
         """Disconnect from DLNA device."""
         self._is_connected = False
+        volume_task = self._volume_task
+        self.cancel_pending_volume()
+        if volume_task and volume_task is not asyncio.current_task():
+            await asyncio.gather(volume_task, return_exceptions=True)
 
         if self._poll_task:
             self._poll_task.cancel()
@@ -603,26 +613,66 @@ class DLNABackend(AudioBackend):
     # =========================================================================
 
     async def set_volume(self, level: int) -> None:
-        """Set volume (0-100)."""
+        """Coalesce slider updates before source checks and network writes."""
         if self._fixed_volume:
             logger.debug("Fixed volume mode: ignoring set_volume")
             return
-        if await self.check_external_playback():
+        if not self._client or self._external_playback:
             return
 
         clamped = max(0, min(100, level))
-        if self._client:
-            await self._client.set_volume(clamped)
-            self._volume = clamped
+        self._volume = clamped
+        self._pending_volume = clamped
+        if self._volume_task is None or self._volume_task.done():
+            self._volume_task = asyncio.create_task(self._flush_volume())
+            # The first caller waits for completion. Further updates only
+            # replace the pending target, without creating a waiting queue.
+            await asyncio.shield(self._volume_task)
+
+    def cancel_pending_volume(self) -> None:
+        """Drop queued values before a new source or session takes control."""
+        self._pending_volume = None
+        task, self._volume_task = self._volume_task, None
+        if task and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _flush_volume(self) -> None:
+        try:
+            while self._volume_task is asyncio.current_task() and self._pending_volume is not None:
+                delay = VOLUME_MIN_INTERVAL_SECONDS - (time.monotonic() - self._last_volume_send_at)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if (
+                    not self._client
+                    or await self.check_external_playback()
+                    or self._volume_task is not asyncio.current_task()
+                ):
+                    return
+                # Updates can arrive while the source check is in flight.
+                volume = self._pending_volume
+                if volume is None:
+                    return
+                self._pending_volume = None
+                self._last_volume_send_at = time.monotonic()
+                if not await self._client.set_volume(volume):
+                    logger.warning("[%s] Could not apply volume", self.name)
+        except Exception:
+            logger.exception("[%s] Volume update failed", self.name)
+        finally:
+            if self._volume_task is asyncio.current_task():
+                self._pending_volume = None
 
     async def get_volume(self) -> int:
         """Get current volume (0-100)."""
         if self._fixed_volume:
             return 100
 
+        if self._volume_task and not self._volume_task.done():
+            return self._volume
         if self._client:
+            sender = self._volume_task
             vol = await self._client.get_volume()
-            if vol is not None:
+            if vol is not None and self._volume_task is sender:
                 self._volume = vol
         return self._volume
 

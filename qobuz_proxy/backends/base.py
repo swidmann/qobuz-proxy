@@ -124,6 +124,9 @@ class AudioBackend(ABC):
         await self.set_volume(new_level)
         return new_level
 
+    def cancel_pending_volume(self) -> None:
+        """Revoke delayed volume commands when a remote session loses ownership."""
+
     # =========================================================================
     # State - Required
     # =========================================================================

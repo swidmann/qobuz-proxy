@@ -17,9 +17,6 @@ from aiohttp import ClientTimeout
 
 logger = logging.getLogger(__name__)
 
-# Minimum interval between volume commands (ms) to avoid overwhelming device
-VOLUME_MIN_INTERVAL_MS = 200
-
 # SOAP constants
 SOAP_ENVELOPE_NS = "http://schemas.xmlsoap.org/soap/envelope/"
 UPNP_AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
@@ -130,9 +127,6 @@ class DLNAClient:
         self._verified_endpoint: Optional[tuple[str, int, Optional[str]]] = None
         self.device_info: Optional[DLNADeviceInfo] = None
         self._session: Optional[aiohttp.ClientSession] = None
-        self._last_volume_time_ms: float = 0
-        self._pending_volume: Optional[int] = None
-        self._volume_debounce_task: Optional[asyncio.Task] = None
         self._volume_lock = asyncio.Lock()
 
     async def connect(self) -> DLNADeviceInfo:
@@ -563,51 +557,18 @@ class DLNAClient:
         return None
 
     async def set_volume(self, volume: int) -> bool:
-        """
-        Set volume with debouncing.
-
-        Rate limits volume commands but ensures the final value is always sent.
-
-        Args:
-            volume: Volume 0-100
-        """
+        """Send a volume selected by the backend's coalescing sender."""
         if not self.device_info or not self.device_info.rendering_control_url:
             logger.warning("Cannot set volume: no RenderingControl URL")
             return False
 
         async with self._volume_lock:
-            now_ms = time.time() * 1000
-            elapsed = now_ms - self._last_volume_time_ms
-
-            if elapsed < VOLUME_MIN_INTERVAL_MS:
-                # Too soon - store pending value and schedule delayed send
-                self._pending_volume = volume
-                if self._volume_debounce_task is None or self._volume_debounce_task.done():
-                    delay_ms = VOLUME_MIN_INTERVAL_MS - elapsed
-                    self._volume_debounce_task = asyncio.create_task(
-                        self._send_pending_volume(delay_ms / 1000.0)
-                    )
-                    logger.debug(f"Debouncing SetVolume({volume}), will send in {delay_ms:.0f}ms")
-                return True
-
-            # Clear any pending volume since we're sending now
-            self._pending_volume = None
             return await self._do_set_volume(volume)
-
-    async def _send_pending_volume(self, delay: float) -> None:
-        """Send pending volume after delay."""
-        await asyncio.sleep(delay)
-        async with self._volume_lock:
-            if self._pending_volume is not None:
-                volume = self._pending_volume
-                self._pending_volume = None
-                await self._do_set_volume(volume)
 
     async def _do_set_volume(self, volume: int) -> bool:
         """Actually send the volume command."""
         if not self.device_info or not self.device_info.rendering_control_url:
             return False
-        self._last_volume_time_ms = time.time() * 1000
         logger.debug(f"SetVolume({volume}) to {self.device_info.rendering_control_url}")
 
         result = await self._soap_action(
